@@ -6,10 +6,13 @@ use std::marker::PhantomData;
 use std::string::ToString;
 use std::sync::Arc;
 
+use crate::range::Range;
 use freqfs::{DirLock, FileLoad};
 use futures::stream::{self, Stream};
 use safecast::AsType;
 use uuid::Uuid;
+
+pub mod range;
 
 const ROOT: &str = "root";
 
@@ -89,7 +92,7 @@ where
 }
 
 impl<K, S, C, FE> BTree<K, S, C, FE> {
-    pub async fn count(&self) -> Result<u64> {
+    pub async fn count(&self, _range: Range<K>) -> Result<u64> {
         todo!()
     }
 
@@ -105,7 +108,7 @@ impl<K, S, C, FE> BTree<K, S, C, FE> {
         todo!()
     }
 
-    pub async fn to_stream(&self) -> impl Stream<Item = Result<K>> {
+    pub async fn to_stream(&self, _range: Range<K>) -> impl Stream<Item = Result<K>> {
         // TODO
         stream::empty()
     }
