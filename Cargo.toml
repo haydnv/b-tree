@@ -1,0 +1,13 @@
+[package]
+name = "b-tree"
+version = "0.1.0"
+authors = ["code@tinychain.net"]
+edition = "2021"
+description = "A persistent B+ tree using freqfs"
+license = "Apache-2.0"
+readme = "README.md"
+keywords = ["persistent", "ordered", "key", "key-value", "index", "collection"]
+categories = ["database", "database-implementations", "data-structures"]
+
+[dependencies]
+freqfs = { path = "../freqfs" }
