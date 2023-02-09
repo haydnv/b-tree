@@ -6,13 +6,15 @@ use std::marker::PhantomData;
 use std::string::ToString;
 use std::sync::Arc;
 
-use crate::range::Range;
 use freqfs::{DirLock, FileLoad};
 use futures::stream::{self, Stream};
 use safecast::AsType;
 use uuid::Uuid;
 
+mod collate;
 pub mod range;
+
+use range::Range;
 
 const ROOT: &str = "root";
 

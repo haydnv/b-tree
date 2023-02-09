@@ -10,6 +10,7 @@ keywords = ["persistent", "ordered", "key", "key-value", "index", "collection"]
 categories = ["database", "database-implementations", "data-structures"]
 
 [dependencies]
+collate = { path = "../collate" }
 freqfs = { path = "../freqfs" }
 futures = "0.3"
 safecast = "0.1"

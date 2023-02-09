@@ -1,5 +1,8 @@
+use std::cmp::Ordering::*;
 use std::fmt;
 use std::ops::{Bound, Range as Bounds};
+
+use collate::Collate;
 
 /// A range used to select a slice of a `BTree`
 #[derive(Clone, Eq, PartialEq)]
@@ -18,7 +21,7 @@ impl<K> Default for Range<K> {
         }
     }
 }
-impl<K> Range<K> {
+impl<K: PartialEq> Range<K> {
     /// Construct a new [`Range`] with the given `prefix`.
     pub fn new(prefix: Vec<K>, range: Bounds<K>) -> Self {
         let Bounds { start, end } = range;
@@ -36,6 +39,89 @@ impl<K> Range<K> {
             prefix,
             start: Bound::Unbounded,
             end: Bound::Unbounded,
+        }
+    }
+
+    /// Return `true` if the `other` [`Range`] lies entirely within this one.
+    pub fn contains<C: Collate<Value = K>>(&self, other: &Self, collator: &C) -> bool {
+        if other.prefix.len() < self.prefix.len() {
+            return false;
+        }
+
+        if &other.prefix[..self.prefix.len()] != &self.prefix[..] {
+            return false;
+        }
+
+        if other.prefix.len() == self.prefix.len() {
+            match &self.start {
+                Bound::Unbounded => {}
+                Bound::Included(outer) => match &other.start {
+                    Bound::Unbounded => return false,
+                    Bound::Included(inner) => {
+                        if collator.compare(inner, outer) == Less {
+                            return false;
+                        }
+                    }
+                    Bound::Excluded(inner) => {
+                        if collator.compare(inner, outer) != Greater {
+                            return false;
+                        }
+                    }
+                },
+                Bound::Excluded(outer) => match &other.start {
+                    Bound::Unbounded => return false,
+                    Bound::Included(inner) => {
+                        if collator.compare(inner, outer) != Greater {
+                            return false;
+                        }
+                    }
+                    Bound::Excluded(inner) => {
+                        if collator.compare(inner, outer) == Less {
+                            return false;
+                        }
+                    }
+                },
+            }
+        } else {
+            let value = &other.prefix[self.prefix.len()];
+
+            match &self.start {
+                Bound::Unbounded => {}
+                Bound::Included(outer) => {
+                    if collator.compare(value, outer) == Less {
+                        return false;
+                    }
+                }
+                Bound::Excluded(outer) => {
+                    if collator.compare(value, outer) != Greater {
+                        return false;
+                    }
+                }
+            }
+
+            match &self.end {
+                Bound::Unbounded => {}
+                Bound::Included(outer) => {
+                    if collator.compare(value, outer) == Greater {
+                        return false;
+                    }
+                }
+                Bound::Excluded(outer) => {
+                    if collator.compare(value, outer) != Less {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        true
+    }
+
+    /// Return `true` if this [`Range`] is has only a prefix.
+    pub fn has_bounds(&self) -> bool {
+        match (&self.start, &self.end) {
+            (Bound::Unbounded, Bound::Unbounded) => true,
+            _ => false,
         }
     }
 
@@ -69,13 +155,16 @@ impl<K> Range<K> {
     }
 }
 
-impl<K> From<(Vec<K>, Bounds<K>)> for Range<K> {
-    fn from(tuple: (Vec<K>, Bounds<K>)) -> Self {
+impl<P, K> From<(P, Bounds<K>)> for Range<K>
+where
+    Vec<K>: From<P>,
+{
+    fn from(tuple: (P, Bounds<K>)) -> Self {
         let (prefix, suffix) = tuple;
         let Bounds { start, end } = suffix;
 
         Self {
-            prefix,
+            prefix: prefix.into(),
             start: Bound::Included(start),
             end: Bound::Excluded(end),
         }
