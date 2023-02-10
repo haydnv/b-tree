@@ -12,31 +12,55 @@ where
     /// Given a collection of slices, return the start and end indices which match the given range.
     fn bisect<V: AsRef<[Self::Value]>>(
         &self,
-        slice: &[V],
+        block: &[V],
+        range: &Range<Self::Value>,
+    ) -> (usize, usize);
+
+    /// Given a collection of slices, return the leftmost insert point matching the given key.
+    fn bisect_left<V: AsRef<[Self::Value]>>(&self, block: &[V], key: &[Self::Value]) -> usize;
+
+    /// Given a collection of slices, return the rightmost insert point matching the given key.
+    fn bisect_right<V: AsRef<[Self::Value]>>(&self, block: &[V], key: &[Self::Value]) -> usize;
+
+    /// Returns the ordering of the given key relative to the given range.
+    fn compare_range(&self, key: &[Self::Value], range: &Range<Self::Value>) -> Ordering;
+
+    /// Returns the relative ordering of the `left` slice with respect to `right`.
+    fn compare_slice(&self, left: &[Self::Value], right: &[Self::Value]) -> Ordering;
+
+    /// Returns `true` if the given block is in sorted order.
+    fn is_sorted<V: AsRef<[Self::Value]>>(&self, block: &[V]) -> bool;
+}
+
+impl<T: Collate> CollateRange for T
+where
+    <T as Collate>::Value: PartialEq,
+{
+    fn bisect<V: AsRef<[Self::Value]>>(
+        &self,
+        block: &[V],
         range: &Range<Self::Value>,
     ) -> (usize, usize) {
-        debug_assert!(self.is_sorted(slice));
+        debug_assert!(self.is_sorted(block));
 
-        let left = bisect_left(slice, |key| self.compare_range(key, range));
-        let right = bisect_right(slice, |key| self.compare_range(key, range));
+        let left = bisect_left(block, |key| self.compare_range(key, range));
+        let right = bisect_right(block, |key| self.compare_range(key, range));
         (left, right)
     }
 
-    /// Given a collection of slices, return the leftmost insert point matching the given key.
-    fn bisect_left<V: AsRef<[Self::Value]>>(&self, slice: &[V], key: &[Self::Value]) -> usize {
-        debug_assert!(self.is_sorted(slice));
+    fn bisect_left<V: AsRef<[Self::Value]>>(&self, block: &[V], key: &[Self::Value]) -> usize {
+        debug_assert!(self.is_sorted(block));
 
-        if slice.as_ref().is_empty() || key.as_ref().is_empty() {
+        if block.as_ref().is_empty() || key.as_ref().is_empty() {
             0
         } else {
-            bisect_left(slice, |at| self.compare_slice(at, key))
+            bisect_left(block, |at| self.compare_slice(at, key))
         }
     }
 
-    /// Given a collection of slices, return the rightmost insert point matching the given key.
-    fn bisect_right<V: AsRef<[Self::Value]>>(&self, slice: &[V], key: &[Self::Value]) -> usize {
-        debug_assert!(self.is_sorted(slice));
-        let slice = slice.as_ref();
+    fn bisect_right<V: AsRef<[Self::Value]>>(&self, block: &[V], key: &[Self::Value]) -> usize {
+        debug_assert!(self.is_sorted(block));
+        let slice = block.as_ref();
 
         if slice.is_empty() {
             0
@@ -47,7 +71,6 @@ where
         }
     }
 
-    /// Returns the ordering of the given key relative to the given range.
     fn compare_range(&self, key: &[Self::Value], range: &Range<Self::Value>) -> Ordering {
         use Bound::*;
         use Ordering::*;
@@ -92,12 +115,7 @@ where
         Equal
     }
 
-    /// Returns the relative ordering of the `left` slice with respect to `right`.
-    fn compare_slice<L: AsRef<[Self::Value]>, R: AsRef<[Self::Value]>>(
-        &self,
-        left: L,
-        right: R,
-    ) -> Ordering {
+    fn compare_slice(&self, left: &[Self::Value], right: &[Self::Value]) -> Ordering {
         let left = left.as_ref();
         let right = right.as_ref();
 
@@ -119,7 +137,6 @@ where
         }
     }
 
-    /// Returns `true` if the given slice is in sorted order.
     fn is_sorted<V: AsRef<[Self::Value]>>(&self, slice: &[V]) -> bool {
         if slice.len() < 2 {
             return true;
@@ -138,8 +155,6 @@ where
     }
 }
 
-impl<T: Collate> CollateRange for T where <T as Collate>::Value: PartialEq {}
-
 fn bisect_left<'a, V: 'a, W: AsRef<[V]>, F: Fn(&'a [V]) -> Ordering>(
     slice: &'a [W],
     cmp: F,
@@ -148,7 +163,7 @@ fn bisect_left<'a, V: 'a, W: AsRef<[V]>, F: Fn(&'a [V]) -> Ordering>(
     let mut end = slice.len();
 
     while start < end {
-        let mid = (start + end) / 2;
+        let mid = (start + end) >> 1;
 
         if cmp(slice[mid].as_ref()) == Ordering::Less {
             start = mid + 1;
@@ -168,7 +183,7 @@ fn bisect_right<'a, V: 'a, W: AsRef<[V]>, F: Fn(&'a [V]) -> Ordering>(
     let mut end = slice.len();
 
     while start < end {
-        let mid = (start + end) / 2;
+        let mid = (start + end) >> 1;
 
         if cmp(slice[mid].as_ref()) == Ordering::Greater {
             end = mid;
@@ -182,70 +197,20 @@ fn bisect_right<'a, V: 'a, W: AsRef<[V]>, F: Fn(&'a [V]) -> Ordering>(
 
 #[cfg(test)]
 mod tests {
-    use std::ops::Deref;
-
     use collate::Collator;
 
     use super::*;
 
-    struct Key {
-        inner: Vec<i32>,
-    }
-
-    impl Deref for Key {
-        type Target = [i32];
-
-        fn deref(&self) -> &[i32] {
-            &self.inner
-        }
-    }
-
-    impl AsRef<[i32]> for Key {
-        fn as_ref(&self) -> &[i32] {
-            self.deref()
-        }
-    }
-
-    struct Block {
-        keys: Vec<Key>,
-    }
-
-    impl Deref for Block {
-        type Target = [Key];
-
-        fn deref(&self) -> &[Key] {
-            &self.keys
-        }
-    }
-
-    impl AsRef<[Key]> for Block {
-        fn as_ref(&self) -> &[Key] {
-            self.deref()
-        }
-    }
-
     #[test]
     fn test_bisect() {
-        let block = Block {
-            keys: vec![
-                Key {
-                    inner: vec![0, -1, 1],
-                },
-                Key {
-                    inner: vec![1, 0, 2, 2],
-                },
-                Key {
-                    inner: vec![1, 1, 0],
-                },
-                Key {
-                    inner: vec![1, 1, 0],
-                },
-                Key {
-                    inner: vec![2, 0, -1],
-                },
-                Key { inner: vec![2, 1] },
-            ],
-        };
+        let block = vec![
+            vec![0, -1, 1],
+            vec![1, 0, 2, 2],
+            vec![1, 1, 0],
+            vec![1, 1, 0],
+            vec![2, 0, -1],
+            vec![2, 1],
+        ];
 
         let collator = Collator::<i32>::default();
         assert!(collator.is_sorted(&block));
@@ -273,39 +238,23 @@ mod tests {
     #[test]
     fn test_range() {
         // TODO: why do some of these asserts fail?
-        let block = Block {
-            keys: vec![
-                Key {
-                    inner: vec![0, -1, 1],
-                },
-                Key {
-                    inner: vec![1, -1, 2],
-                },
-                Key {
-                    inner: vec![1, 0, -1],
-                },
-                Key {
-                    inner: vec![1, 0, 2, 2],
-                },
-                Key {
-                    inner: vec![1, 1, 0],
-                },
-                Key {
-                    inner: vec![1, 1, 0],
-                },
-                Key {
-                    inner: vec![1, 2, 1],
-                },
-                Key { inner: vec![2, 1] },
-                Key { inner: vec![3, 1] },
-            ],
-        };
+        let block = vec![
+            vec![0, -1, 1],
+            vec![1, -1, 2],
+            vec![1, 0, -1],
+            vec![1, 0, 2, 2],
+            vec![1, 1, 0],
+            vec![1, 1, 0],
+            vec![1, 2, 1],
+            vec![2, 1],
+            vec![3, 1],
+        ];
 
         let collator = Collator::<i32>::default();
         assert!(collator.is_sorted(&block));
 
-        // let range = Range::from(([], 0..1));
-        // assert_eq!(collator.bisect(&block, &range), (0, 1));
+        let range = Range::from(([], 0..1));
+        assert_eq!(collator.bisect(&block, &range), (0, 1));
 
         // let range = Range::from(([1], 0..1));
         // assert_eq!(collator.bisect(&block, &range), (2, 4));

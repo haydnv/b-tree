@@ -120,8 +120,8 @@ impl<K: PartialEq> Range<K> {
     /// Return `true` if this [`Range`] is has only a prefix.
     pub fn has_bounds(&self) -> bool {
         match (&self.start, &self.end) {
-            (Bound::Unbounded, Bound::Unbounded) => true,
-            _ => false,
+            (Bound::Unbounded, Bound::Unbounded) => false,
+            _ => true,
         }
     }
 
