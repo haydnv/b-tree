@@ -7,21 +7,22 @@ use std::string::ToString;
 use std::sync::Arc;
 
 use freqfs::{DirLock, DirReadGuard, DirWriteGuard, FileLoad};
-use futures::stream::{self, Stream};
-use futures::TryStream;
+use futures::future::FutureExt;
+use futures::stream::{self, Stream, TryStream};
 use safecast::AsType;
 use uuid::Uuid;
 
 mod collate;
 pub mod range;
 
-use range::Range;
+use crate::collate::{Collate, CollateRange};
+use crate::range::Range;
 
 const ROOT: &str = "root";
 
 pub enum Node<V> {
     Index(Vec<Uuid>),
-    Leaf(Vec<V>),
+    Leaf(Vec<Vec<V>>),
 }
 
 /// The result of a B+ tree operation
@@ -30,7 +31,7 @@ pub type Result<T> = std::result::Result<T, io::Error>;
 /// The schema of a B+ tree
 pub trait Schema {
     type Error: std::error::Error;
-    type Value;
+    type Value: Eq;
 
     /// Get the maximum size in bytes of a leaf node in a B+ tree with this [`Schema`].
     fn block_size(&self) -> usize;
@@ -107,10 +108,34 @@ where
             "B+ tree is missing a root node",
         ))
     }
+}
 
-    /// Borrow the schema of this B+ tree.
-    pub fn schema(&self) -> &S {
-        &self.schema
+impl<S, C, FE> BTreeLock<S, C, FE>
+where
+    FE: FileLoad,
+{
+    /// Lock this B+ tree for reading
+    pub async fn read(&self) -> BTreeReadGuard<S, C, FE> {
+        self.dir
+            .read()
+            .map(|dir| BTreeReadGuard {
+                schema: self.schema.clone(),
+                collator: self.collator.clone(),
+                dir,
+            })
+            .await
+    }
+
+    /// Lock this B+ tree for writing
+    pub async fn write(&self) -> BTreeWriteGuard<S, C, FE> {
+        self.dir
+            .write()
+            .map(|dir| BTreeWriteGuard {
+                schema: self.schema.clone(),
+                collator: self.collator.clone(),
+                dir,
+            })
+            .await
     }
 }
 
@@ -166,6 +191,7 @@ pub struct BTreeWriteGuard<S, C, FE> {
 impl<S, C, FE> BTreeWriteGuard<S, C, FE>
 where
     S: Schema,
+    C: Collate<Value = S::Value>,
     FE: FileLoad + AsType<Node<S::Value>>,
 {
     /// Delete the given `key` from this B+ tree.
@@ -174,8 +200,28 @@ where
     }
 
     /// Insert the given `key` into this B+ tree.
-    pub async fn insert(&self, _key: Vec<S::Value>) -> Result<bool> {
-        todo!()
+    pub async fn insert(&self, key: Vec<S::Value>) -> Result<bool> {
+        let mut root = self.dir.get_file(ROOT).expect("root").write().await?;
+
+        match &mut *root {
+            Node::Leaf(keys) => {
+                let i = self.collator.bisect_left(&keys, &key);
+                if keys[i] == key {
+                    // no-op
+                    return Ok(false);
+                }
+                keys.insert(i, key);
+
+                if keys.len() == self.schema.order() {
+                    unimplemented!()
+                }
+            }
+            Node::Index(_children) => {
+                unimplemented!("insert into index node")
+            }
+        };
+
+        Ok(true)
     }
 
     /// Insert all of the given `keys` into this B+ tree.

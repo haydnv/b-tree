@@ -17,10 +17,10 @@ use b_tree::{BTreeLock, Node};
 const BLOCK_SIZE: usize = 4_096;
 
 enum File {
-    Node(Node<i32>),
+    Node(Node<i16>),
 }
 
-as_type!(File, Node, Node<i32>);
+as_type!(File, Node, Node<i16>);
 
 struct FileVisitor;
 
@@ -101,7 +101,7 @@ struct Schema;
 
 impl b_tree::Schema for Schema {
     type Error = io::Error;
-    type Value = i32;
+    type Value = i16;
 
     fn block_size(&self) -> usize {
         BLOCK_SIZE
@@ -111,7 +111,7 @@ impl b_tree::Schema for Schema {
         5
     }
 
-    fn validate(&self, key: Vec<i32>) -> Result<Vec<i32>, io::Error> {
+    fn validate(&self, key: Vec<i16>) -> Result<Vec<i16>, io::Error> {
         if key.len() == 3 {
             Ok(key)
         } else {
@@ -147,7 +147,12 @@ async fn main() -> Result<(), io::Error> {
     let dir = cache.load(path.clone())?;
 
     // create a new B+ tree
-    let _btree = BTreeLock::create(Schema, Collator::<i32>::default(), dir);
+    let btree = BTreeLock::create(Schema, Collator::default(), dir)?;
+
+    {
+        let view = btree.write().await;
+        assert!(view.insert(vec![0, i16::MAX, i16::MAX]).await?);
+    }
 
     // clean up
     fs::remove_dir(path).await

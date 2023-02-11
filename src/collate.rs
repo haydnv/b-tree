@@ -1,14 +1,11 @@
 use std::cmp::Ordering;
 use std::ops::Bound;
 
-use collate::Collate;
+pub use collate::Collate;
 
 use super::range::Range;
 
-trait CollateRange: Collate
-where
-    <Self as Collate>::Value: PartialEq,
-{
+pub(crate) trait CollateRange: Collate {
     /// Given a collection of slices, return the start and end indices which match the given range.
     fn bisect<V: AsRef<[Self::Value]>>(
         &self,
