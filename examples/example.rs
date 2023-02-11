@@ -2,11 +2,15 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use collate::Collator;
+use destream::{de, en};
 use freqfs::{Cache, FileLoad};
+use futures::{TryFutureExt, TryStreamExt};
 use rand::Rng;
 use safecast::as_type;
 use tokio::fs;
+use tokio_util::io::StreamReader;
 
 use b_tree::{BTreeLock, Node};
 
@@ -18,18 +22,78 @@ enum File {
 
 as_type!(File, Node, Node<i32>);
 
+struct FileVisitor;
+
+#[async_trait]
+impl de::Visitor for FileVisitor {
+    type Value = File;
+
+    fn expecting() -> &'static str {
+        "a B+Tree node"
+    }
+
+    async fn visit_seq<A: de::SeqAccess>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let leaf = seq.expect_next::<bool>(()).await?;
+
+        if leaf {
+            seq.expect_next(())
+                .map_ok(Node::Leaf)
+                .map_ok(File::Node)
+                .await
+        } else {
+            seq.expect_next(())
+                .map_ok(Node::Index)
+                .map_ok(File::Node)
+                .await
+        }
+    }
+}
+
+#[async_trait]
+impl de::FromStream for File {
+    type Context = ();
+
+    async fn from_stream<D: de::Decoder>(_: (), decoder: &mut D) -> Result<Self, D::Error> {
+        decoder.decode_seq(FileVisitor).await
+    }
+}
+
+impl<'en> en::ToStream<'en> for File {
+    fn to_stream<E: en::Encoder<'en>>(&'en self, encoder: E) -> Result<E::Ok, E::Error> {
+        use en::IntoStream;
+
+        match self {
+            Self::Node(node) => match node {
+                Node::Leaf(keys) => (true, keys).into_stream(encoder),
+                Node::Index(children) => (false, children).into_stream(encoder),
+            },
+        }
+    }
+}
+
 #[async_trait]
 impl FileLoad for File {
     async fn load(
         _path: &Path,
-        mut _file: fs::File,
+        file: fs::File,
         _metadata: std::fs::Metadata,
     ) -> Result<Self, io::Error> {
-        unimplemented!("File::load")
+        destream_json::de::read_from((), file)
+            .map_err(|cause| io::Error::new(io::ErrorKind::InvalidData, cause))
+            .await
     }
 
-    async fn save(&self, _file: &mut fs::File) -> Result<u64, io::Error> {
-        unimplemented!("File::save")
+    async fn save(&self, file: &mut fs::File) -> Result<u64, io::Error> {
+        let encoded = destream_json::en::encode(self)
+            .map_err(|cause| io::Error::new(io::ErrorKind::InvalidData, cause))?;
+
+        let mut reader = StreamReader::new(
+            encoded
+                .map_ok(Bytes::from)
+                .map_err(|cause| io::Error::new(io::ErrorKind::InvalidData, cause)),
+        );
+
+        tokio::io::copy(&mut reader, file).await
     }
 }
 
