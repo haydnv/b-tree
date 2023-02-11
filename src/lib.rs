@@ -1,4 +1,6 @@
-//! A persistent B+ tree using [`freqfs`]
+//! A persistent B+ tree using [`freqfs`].
+//!
+//! See the `examples` directory for usage examples.
 
 use std::io;
 use std::string::ToString;
@@ -76,7 +78,12 @@ where
         let mut nodes = dir.try_write()?;
 
         if dir.try_read()?.is_empty() {
-            nodes.create_file::<Node<S::Value>>(ROOT.to_string(), Node::Leaf(vec![]), 0)?;
+            nodes.create_file::<Node<S::Value>>(
+                ROOT.to_string(),
+                Node::Leaf(vec![]),
+                schema.block_size(),
+            )?;
+
             Ok(Self::new(schema, collator, dir))
         } else {
             Err(io::Error::new(
@@ -90,14 +97,15 @@ where
     pub fn load(schema: S, collator: C, dir: DirLock<FE>) -> Result<Self> {
         let nodes = dir.try_read()?;
 
-        if nodes.contains(ROOT) {
-            Ok(Self::new(schema, collator, dir))
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "cannot load a B+ tree from an empty file",
-            ))
+        if let Some(root) = nodes.get_file(ROOT) {
+            let _root = root.try_read()?;
+            return Ok(Self::new(schema, collator, dir));
         }
+
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "B+ tree is missing a root node",
+        ))
     }
 
     /// Borrow the schema of this B+ tree.
