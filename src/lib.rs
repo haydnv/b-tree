@@ -1,13 +1,12 @@
 //! A persistent B+ tree using [`freqfs`]
 
-use std::fmt;
 use std::io;
-use std::marker::PhantomData;
 use std::string::ToString;
 use std::sync::Arc;
 
-use freqfs::{DirLock, FileLoad};
+use freqfs::{DirLock, DirReadGuard, DirWriteGuard, FileLoad};
 use futures::stream::{self, Stream};
+use futures::TryStream;
 use safecast::AsType;
 use uuid::Uuid;
 
@@ -18,53 +17,67 @@ use range::Range;
 
 const ROOT: &str = "root";
 
-type Node = Vec<Uuid>;
-type Leaf<K> = Vec<K>;
-
-/// The result of a [`BTree`] operation
-pub type Result<T> = std::result::Result<T, io::Error>;
-
-/// The schema of a [`BTree`]
-pub trait Schema<K> {}
-
-/// A persistent B+ tree
-pub struct BTree<K, S, C, FE> {
-    dir: DirLock<FE>,
-    schema: Arc<S>,
-    collator: Arc<C>,
-    key: PhantomData<K>,
+pub enum Node<V> {
+    Index(Vec<Uuid>),
+    Leaf(Vec<V>),
 }
 
-impl<K, S, C, FE> Clone for BTree<K, S, C, FE> {
+/// The result of a B+ tree operation
+pub type Result<T> = std::result::Result<T, io::Error>;
+
+/// The schema of a B+ tree
+pub trait Schema {
+    type Error: std::error::Error;
+    type Value;
+
+    /// Get the maximum size in bytes of a leaf node in a B+ tree with this [`Schema`].
+    fn block_size(&self) -> usize;
+
+    /// Get the order of the nodes in a B+ tree with this [`Schema`].
+    fn order(&self) -> usize;
+
+    /// Return a validated version of the given `key`, or a validation error.
+    fn validate(&self, key: Vec<Self::Value>)
+        -> std::result::Result<Vec<Self::Value>, Self::Error>;
+}
+
+/// A lock to synchronize access to a persistent B+ tree
+pub struct BTreeLock<S, C, FE> {
+    schema: Arc<S>,
+    collator: Arc<C>,
+    dir: DirLock<FE>,
+}
+
+impl<S, C, FE> Clone for BTreeLock<S, C, FE> {
     fn clone(&self) -> Self {
         Self {
-            dir: self.dir.clone(),
             schema: self.schema.clone(),
             collator: self.collator.clone(),
-            key: PhantomData,
+            dir: self.dir.clone(),
         }
     }
 }
 
-impl<K, S, C, FE> BTree<K, S, C, FE>
+impl<S, C, FE> BTreeLock<S, C, FE>
 where
-    K: Eq + Ord + fmt::Debug,
-    S: Schema<K>,
-    FE: FileLoad + AsType<Node> + AsType<Leaf<K>>,
+    S: Schema,
+    FE: FileLoad + AsType<Node<S::Value>>,
 {
-    /// Create a new [`BTree`] in `dir` with the given `schema` and `collator`
-    pub fn create(dir: DirLock<FE>, schema: S, collator: C) -> Result<Self> {
+    fn new(schema: S, collator: C, dir: DirLock<FE>) -> Self {
+        Self {
+            schema: Arc::new(schema),
+            collator: Arc::new(collator),
+            dir,
+        }
+    }
+
+    /// Create a new [`BTreeLock`] in `dir` with the given `collator`
+    pub fn create(schema: S, collator: C, dir: DirLock<FE>) -> Result<Self> {
         let mut nodes = dir.try_write()?;
 
         if dir.try_read()?.is_empty() {
-            nodes.create_file::<Leaf<K>>(ROOT.to_string(), Leaf::new(), 0)?;
-
-            Ok(Self {
-                dir,
-                schema: Arc::new(schema),
-                collator: Arc::new(collator),
-                key: PhantomData,
-            })
+            nodes.create_file::<Node<S::Value>>(ROOT.to_string(), Node::Leaf(vec![]), 0)?;
+            Ok(Self::new(schema, collator, dir))
         } else {
             Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -73,17 +86,12 @@ where
         }
     }
 
-    /// Load a [`BTree`] with the given `schema` and `collator` from `dir`
-    pub fn load(dir: DirLock<FE>, schema: S, collator: C) -> Result<Self> {
+    /// Load a [`BTreeLock`] with the given `schema` and `collator` from `dir`
+    pub fn load(schema: S, collator: C, dir: DirLock<FE>) -> Result<Self> {
         let nodes = dir.try_read()?;
 
         if nodes.contains(ROOT) {
-            Ok(Self {
-                dir,
-                schema: Arc::new(schema),
-                collator: Arc::new(collator),
-                key: PhantomData,
-            })
+            Ok(Self::new(schema, collator, dir))
         } else {
             Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -91,27 +99,91 @@ where
             ))
         }
     }
+
+    /// Borrow the schema of this B+ tree.
+    pub fn schema(&self) -> &S {
+        &self.schema
+    }
 }
 
-impl<K, S, C, FE> BTree<K, S, C, FE> {
-    pub async fn count(&self, _range: Range<K>) -> Result<u64> {
+/// A read-only view of a B+ tree
+pub struct BTreeReadGuard<S, C, FE> {
+    schema: Arc<S>,
+    collator: Arc<C>,
+    dir: DirReadGuard<FE>,
+}
+
+impl<S, C, FE> BTreeReadGuard<S, C, FE>
+where
+    S: Schema,
+    FE: FileLoad + AsType<Node<S::Value>>,
+{
+    /// Borrow the schema of the source B+ tree.
+    pub fn schema(&self) -> &S {
+        &self.schema
+    }
+
+    /// Return `true` if this B+ tree contains the given `key`.
+    pub async fn contains(&self, _key: Vec<S::Value>) -> Result<bool> {
         todo!()
     }
 
-    pub async fn delete(&self, _key: Vec<K>) -> Result<bool> {
+    /// Count how many keys lie within the given `range` of this B+ tree.
+    pub async fn count(&self, _range: Range<S::Value>) -> Result<u64> {
         todo!()
     }
 
-    pub async fn insert(&self, _key: Vec<K>) -> Result<bool> {
+    /// Return `true` if the given `range` of this B+ tree contains no keys.
+    pub async fn is_empty(&self, _range: Range<S::Value>) -> Result<u64> {
         todo!()
     }
 
-    pub async fn merge<Keys: Stream<Item = Result<K>>>(&self, _keys: Keys) {
-        todo!()
-    }
-
-    pub async fn to_stream(&self, _range: Range<K>) -> impl Stream<Item = Result<K>> {
+    /// Read all the keys in the given `range` of this B+ tree.
+    pub async fn to_stream(
+        &self,
+        _range: Range<S::Value>,
+    ) -> impl Stream<Item = Result<Vec<S::Value>>> {
         // TODO
         stream::empty()
+    }
+}
+
+/// A mutable view of a B+ tree
+pub struct BTreeWriteGuard<S, C, FE> {
+    schema: Arc<S>,
+    collator: Arc<C>,
+    dir: DirWriteGuard<FE>,
+}
+
+impl<S, C, FE> BTreeWriteGuard<S, C, FE>
+where
+    S: Schema,
+    FE: FileLoad + AsType<Node<S::Value>>,
+{
+    /// Delete the given `key` from this B+ tree.
+    pub async fn delete(&self, _key: Vec<S::Value>) -> Result<bool> {
+        todo!()
+    }
+
+    /// Insert the given `key` into this B+ tree.
+    pub async fn insert(&self, _key: Vec<S::Value>) -> Result<bool> {
+        todo!()
+    }
+
+    /// Insert all of the given `keys` into this B+ tree.
+    ///
+    /// The provided keys will be collated prior to insertion.
+    pub async fn insert_all<Keys: TryStream<Item = Vec<S::Value>>>(
+        &self,
+        _keys: Keys,
+    ) -> Result<()> {
+        todo!()
+    }
+
+    /// Merge the keys in the `other` B+ tree range into this one.
+    ///
+    /// The source B+ tree **must** have an identical schema and collation.
+    pub async fn merge(&self, _other: BTreeReadGuard<S, C, FE>) {
+        todo!()
     }
 }
