@@ -177,7 +177,7 @@ async fn main() -> Result<(), io::Error> {
     {
         let mut view = btree.write().await;
 
-        for i in 0..7 {
+        for i in 0..8 {
             let lo = i;
             let hi = i16::MAX - lo;
             let spread = hi - lo;

@@ -221,7 +221,7 @@ where
 
                 if keys.len() > self.schema.order() {
                     let size = self.schema.block_size() / 2;
-                    let right: Vec<_> = keys.drain((self.schema.order() / 2)..).collect();
+                    let right: Vec<_> = keys.drain(div_ceil(self.schema.order(), 2)..).collect();
                     let left: Vec<_> = keys.drain(..).collect();
 
                     let left_key = left[0].clone();
@@ -243,14 +243,29 @@ where
                     i => i - 1,
                 };
 
-                return insert(
+                let mut child = self
+                    .dir
+                    .get_file(&children[i])
+                    .expect("node")
+                    .write()
+                    .await?;
+
+                let left = insert(
                     &mut self.dir,
                     &*self.schema,
                     &*self.collator,
-                    &children[i],
+                    &mut child,
                     key,
                 )
-                .await;
+                .await?;
+
+                match left {
+                    None => return Ok(false),
+                    Some(left) => {
+                        bounds[i] = left;
+                        None
+                    }
+                }
             }
         };
 
@@ -291,9 +306,9 @@ fn insert<'a, FE, S, C, V>(
     dir: &'a mut DirWriteGuard<FE>,
     schema: &'a S,
     collator: &'a C,
-    node_id: &'a Uuid,
+    node: &'a mut Node<V>,
     key: Key<V>,
-) -> Pin<Box<dyn Future<Output = Result<bool>> + 'a>>
+) -> Pin<Box<dyn Future<Output = Result<Option<Key<V>>>> + 'a>>
 where
     FE: FileLoad + AsType<Node<V>>,
     S: Schema<Value = V>,
@@ -301,23 +316,23 @@ where
     V: Clone + PartialEq + 'a,
 {
     Box::pin(async move {
-        let mut node = dir.get_file(node_id).expect("node").write().await?;
-
-        match &mut *node {
+        match node {
             Node::Leaf(keys) => {
                 let i = collator.bisect_left(&keys, &key);
 
                 if i < keys.len() && keys[i] == key {
                     // no-op
-                    return Ok(false);
+                    return Ok(None);
                 }
 
                 keys.insert(i, key);
 
                 if keys.len() > schema.order() {
+                    // TODO:
                     unimplemented!("split a leaf of an index node")
                 } else {
                     debug_assert!(keys.len() > div_ceil(schema.order(), 2));
+                    Ok(Some(keys[0].clone()))
                 }
             }
             Node::Index(bounds, children) => {
@@ -327,9 +342,7 @@ where
 
                 unimplemented!("insert into an index node");
             }
-        };
-
-        Ok(true)
+        }
     })
 }
 
