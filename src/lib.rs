@@ -2,12 +2,13 @@
 //!
 //! See the `examples` directory for usage examples.
 
+use std::pin::Pin;
 use std::string::ToString;
 use std::sync::Arc;
 use std::{fmt, io};
 
 use freqfs::{DirLock, DirReadGuard, DirWriteGuard, FileLoad};
-use futures::future::FutureExt;
+use futures::future::{Future, FutureExt};
 use futures::stream::{self, Stream};
 use safecast::AsType;
 use uuid::Uuid;
@@ -18,7 +19,7 @@ pub mod range;
 use crate::collate::{Collate, CollateRange};
 use crate::range::Range;
 
-const ROOT: &str = "root";
+const ROOT: Uuid = Uuid::from_fields(0, 0, 0, &[0u8; 8]);
 
 type Key<V> = Vec<V>;
 
@@ -107,7 +108,7 @@ where
     pub fn load(schema: S, collator: C, dir: DirLock<FE>) -> Result<Self> {
         let nodes = dir.try_read()?;
 
-        if let Some(root) = nodes.get_file(ROOT) {
+        if let Some(root) = nodes.get_file(&ROOT) {
             let _root = root.try_read()?;
             return Ok(Self::new(schema, collator, dir));
         }
@@ -205,7 +206,7 @@ where
 
     /// Insert the given `key` into this B+ tree.
     pub async fn insert(&mut self, key: Key<S::Value>) -> Result<bool> {
-        let mut root = self.dir.get_file(ROOT).expect("root").write().await?;
+        let mut root = self.dir.get_file(&ROOT).expect("root").write().await?;
 
         let new_root = match &mut *root {
             Node::Leaf(keys) => {
@@ -218,9 +219,9 @@ where
 
                 keys.insert(i, key);
 
-                if keys.len() == (2 * self.schema.order()) - 1 {
+                if keys.len() > self.schema.order() {
                     let size = self.schema.block_size() / 2;
-                    let right: Vec<_> = keys.drain(self.schema.order()..).collect();
+                    let right: Vec<_> = keys.drain((self.schema.order() / 2)..).collect();
                     let left: Vec<_> = keys.drain(..).collect();
 
                     let left_key = left[0].clone();
@@ -231,17 +232,25 @@ where
 
                     Some(Node::Index(vec![left_key, right_key], vec![left, right]))
                 } else {
-                    debug_assert!(
-                        keys.len() < self.schema.order() * 2,
-                        "root node is a leaf with {} keys",
-                        keys.len()
-                    );
-
                     None
                 }
             }
-            Node::Index(_bounds, _children) => {
-                unimplemented!("insert into index node")
+            Node::Index(bounds, children) => {
+                debug_assert_eq!(bounds.len(), children.len());
+
+                let i = match self.collator.bisect_left(&bounds, &key) {
+                    0 => unimplemented!("insert a key to the left of the leftmost"),
+                    i => i - 1,
+                };
+
+                return insert(
+                    &mut self.dir,
+                    &*self.schema,
+                    &*self.collator,
+                    &children[i],
+                    key,
+                )
+                .await;
             }
         };
 
@@ -274,5 +283,60 @@ where
         }
 
         todo!()
+    }
+}
+
+#[inline]
+fn insert<'a, FE, S, C, V>(
+    dir: &'a mut DirWriteGuard<FE>,
+    schema: &'a S,
+    collator: &'a C,
+    node_id: &'a Uuid,
+    key: Key<V>,
+) -> Pin<Box<dyn Future<Output = Result<bool>> + 'a>>
+where
+    FE: FileLoad + AsType<Node<V>>,
+    S: Schema<Value = V>,
+    C: Collate<Value = V>,
+    V: Clone + PartialEq + 'a,
+{
+    Box::pin(async move {
+        let mut node = dir.get_file(node_id).expect("node").write().await?;
+
+        match &mut *node {
+            Node::Leaf(keys) => {
+                let i = collator.bisect_left(&keys, &key);
+
+                if i < keys.len() && keys[i] == key {
+                    // no-op
+                    return Ok(false);
+                }
+
+                keys.insert(i, key);
+
+                if keys.len() > schema.order() {
+                    unimplemented!("split a leaf of an index node")
+                } else {
+                    debug_assert!(keys.len() > div_ceil(schema.order(), 2));
+                }
+            }
+            Node::Index(bounds, children) => {
+                debug_assert_eq!(bounds.len(), children.len());
+                debug_assert!(children.len() > div_ceil(schema.order(), 2) - 1);
+                debug_assert!(children.len() < schema.order());
+
+                unimplemented!("insert into an index node");
+            }
+        };
+
+        Ok(true)
+    })
+}
+
+#[inline]
+fn div_ceil(num: usize, denom: usize) -> usize {
+    match num % denom {
+        0 => num / denom,
+        _ => (num / denom) + 1,
     }
 }

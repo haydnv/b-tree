@@ -13,7 +13,7 @@ use safecast::as_type;
 use tokio::fs;
 use tokio_util::io::StreamReader;
 
-use b_tree::{BTreeLock, Node};
+use b_tree::{BTreeLock, Node, Schema};
 
 const BLOCK_SIZE: usize = 4_096;
 
@@ -99,12 +99,12 @@ impl FileLoad for File {
 }
 
 #[derive(Debug)]
-struct Schema<T> {
+struct ExampleSchema<T> {
     size: usize,
     value: PhantomData<T>,
 }
 
-impl<T> Schema<T> {
+impl<T> ExampleSchema<T> {
     fn new(size: usize) -> Self {
         Self {
             size,
@@ -113,15 +113,15 @@ impl<T> Schema<T> {
     }
 }
 
-impl<T> PartialEq for Schema<T> {
+impl<T> PartialEq for ExampleSchema<T> {
     fn eq(&self, other: &Self) -> bool {
         self.size == other.size
     }
 }
 
-impl<T> Eq for Schema<T> {}
+impl<T> Eq for ExampleSchema<T> {}
 
-impl<T: fmt::Debug> b_tree::Schema for Schema<T> {
+impl<T: fmt::Debug> Schema for ExampleSchema<T> {
     type Error = io::Error;
     type Value = i16;
 
@@ -162,14 +162,14 @@ async fn main() -> Result<(), io::Error> {
     // set up the test directory
     let path = setup_tmp_dir().await?;
 
+    // construct the schema
+    let schema = ExampleSchema::<i16>::new(3);
+
     // initialize the cache
-    let cache = Cache::<File>::new(40, None);
+    let cache = Cache::<File>::new(schema.block_size(), None);
 
     // load the directory and file paths into memory (not file contents, yet)
     let dir = cache.load(path.clone())?;
-
-    // construct the schema
-    let schema = Schema::<i16>::new(3);
 
     // create a new B+ tree
     let btree = BTreeLock::create(schema, Collator::<i16>::default(), dir)?;
@@ -177,7 +177,7 @@ async fn main() -> Result<(), io::Error> {
     {
         let mut view = btree.write().await;
 
-        for i in 0..9 {
+        for i in 0..7 {
             let lo = i;
             let hi = i16::MAX - lo;
             let spread = hi - lo;
