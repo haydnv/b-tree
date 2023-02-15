@@ -175,10 +175,16 @@ async fn main() -> Result<(), io::Error> {
     let btree = BTreeLock::create(schema, Collator::<i16>::default(), dir)?;
 
     {
-        let view = btree.write().await;
-        assert!(view.insert(vec![0, i16::MAX, i16::MAX]).await?);
+        let mut view = btree.write().await;
+
+        for i in 0..9 {
+            let lo = i;
+            let hi = i16::MAX - lo;
+            let spread = hi - lo;
+            assert!(view.insert(vec![lo, hi, spread]).await?)
+        }
     }
 
     // clean up
-    fs::remove_dir(path).await
+    fs::remove_dir_all(path).await
 }

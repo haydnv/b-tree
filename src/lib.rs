@@ -33,7 +33,7 @@ pub type Result<T> = std::result::Result<T, io::Error>;
 /// The schema of a B+ tree
 pub trait Schema: Eq + fmt::Debug {
     type Error: std::error::Error;
-    type Value: Eq;
+    type Value: Clone + Eq;
 
     /// Get the maximum size in bytes of a leaf node in a B+ tree with this [`Schema`].
     fn block_size(&self) -> usize;
@@ -204,10 +204,10 @@ where
     }
 
     /// Insert the given `key` into this B+ tree.
-    pub async fn insert(&self, key: Key<S::Value>) -> Result<bool> {
+    pub async fn insert(&mut self, key: Key<S::Value>) -> Result<bool> {
         let mut root = self.dir.get_file(ROOT).expect("root").write().await?;
 
-        match &mut *root {
+        let new_root = match &mut *root {
             Node::Leaf(keys) => {
                 let i = self.collator.bisect_left(&keys, &key);
 
@@ -218,14 +218,36 @@ where
 
                 keys.insert(i, key);
 
-                if keys.len() == self.schema.order() {
-                    unimplemented!()
+                if keys.len() == (2 * self.schema.order()) - 1 {
+                    let size = self.schema.block_size() / 2;
+                    let right: Vec<_> = keys.drain(self.schema.order()..).collect();
+                    let left: Vec<_> = keys.drain(..).collect();
+
+                    let left_key = left[0].clone();
+                    let (left, _) = self.dir.create_file_unique(Node::Leaf(left), size)?;
+
+                    let right_key = right[0].clone();
+                    let (right, _) = self.dir.create_file_unique(Node::Leaf(right), size)?;
+
+                    Some(Node::Index(vec![left_key, right_key], vec![left, right]))
+                } else {
+                    debug_assert!(
+                        keys.len() < self.schema.order() * 2,
+                        "root node is a leaf with {} keys",
+                        keys.len()
+                    );
+
+                    None
                 }
             }
             Node::Index(_bounds, _children) => {
                 unimplemented!("insert into index node")
             }
         };
+
+        if let Some(new_root) = new_root {
+            *root = new_root;
+        }
 
         Ok(true)
     }
