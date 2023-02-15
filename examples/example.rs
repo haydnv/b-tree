@@ -1,5 +1,6 @@
-use std::io;
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
+use std::{fmt, io};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -42,7 +43,7 @@ impl de::Visitor for FileVisitor {
                 .await
         } else {
             seq.expect_next(())
-                .map_ok(Node::Index)
+                .map_ok(|(bounds, children)| Node::Index(bounds, children))
                 .map_ok(File::Node)
                 .await
         }
@@ -65,7 +66,7 @@ impl<'en> en::ToStream<'en> for File {
         match self {
             Self::Node(node) => match node {
                 Node::Leaf(keys) => (true, keys).into_stream(encoder),
-                Node::Index(children) => (false, children).into_stream(encoder),
+                Node::Index(bounds, children) => (false, (bounds, children)).into_stream(encoder),
             },
         }
     }
@@ -97,9 +98,30 @@ impl FileLoad for File {
     }
 }
 
-struct Schema;
+#[derive(Debug)]
+struct Schema<T> {
+    size: usize,
+    value: PhantomData<T>,
+}
 
-impl b_tree::Schema for Schema {
+impl<T> Schema<T> {
+    fn new(size: usize) -> Self {
+        Self {
+            size,
+            value: PhantomData,
+        }
+    }
+}
+
+impl<T> PartialEq for Schema<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.size == other.size
+    }
+}
+
+impl<T> Eq for Schema<T> {}
+
+impl<T: fmt::Debug> b_tree::Schema for Schema<T> {
     type Error = io::Error;
     type Value = i16;
 
@@ -112,12 +134,12 @@ impl b_tree::Schema for Schema {
     }
 
     fn validate(&self, key: Vec<i16>) -> Result<Vec<i16>, io::Error> {
-        if key.len() == 3 {
+        if key.len() == self.size {
             Ok(key)
         } else {
             Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "key length should be 3",
+                format!("key length should be {}", self.size),
             ))
         }
     }
@@ -146,8 +168,11 @@ async fn main() -> Result<(), io::Error> {
     // load the directory and file paths into memory (not file contents, yet)
     let dir = cache.load(path.clone())?;
 
+    // construct the schema
+    let schema = Schema::<i16>::new(3);
+
     // create a new B+ tree
-    let btree = BTreeLock::create(Schema, Collator::default(), dir)?;
+    let btree = BTreeLock::create(schema, Collator::<i16>::default(), dir)?;
 
     {
         let view = btree.write().await;

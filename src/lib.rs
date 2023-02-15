@@ -2,13 +2,13 @@
 //!
 //! See the `examples` directory for usage examples.
 
-use std::io;
 use std::string::ToString;
 use std::sync::Arc;
+use std::{fmt, io};
 
 use freqfs::{DirLock, DirReadGuard, DirWriteGuard, FileLoad};
 use futures::future::FutureExt;
-use futures::stream::{self, Stream, TryStream};
+use futures::stream::{self, Stream};
 use safecast::AsType;
 use uuid::Uuid;
 
@@ -20,16 +20,18 @@ use crate::range::Range;
 
 const ROOT: &str = "root";
 
+type Key<V> = Vec<V>;
+
 pub enum Node<V> {
-    Index(Vec<Uuid>),
-    Leaf(Vec<Vec<V>>),
+    Index(Vec<Key<V>>, Vec<Uuid>),
+    Leaf(Vec<Key<V>>),
 }
 
 /// The result of a B+ tree operation
 pub type Result<T> = std::result::Result<T, io::Error>;
 
 /// The schema of a B+ tree
-pub trait Schema {
+pub trait Schema: Eq + fmt::Debug {
     type Error: std::error::Error;
     type Value: Eq;
 
@@ -40,8 +42,8 @@ pub trait Schema {
     fn order(&self) -> usize;
 
     /// Return a validated version of the given `key`, or a validation error.
-    fn validate(&self, key: Vec<Self::Value>)
-        -> std::result::Result<Vec<Self::Value>, Self::Error>;
+    fn validate(&self, key: Key<Self::Value>)
+        -> std::result::Result<Key<Self::Value>, Self::Error>;
 }
 
 /// A lock to synchronize access to a persistent B+ tree
@@ -58,6 +60,13 @@ impl<S, C, FE> Clone for BTreeLock<S, C, FE> {
             collator: self.collator.clone(),
             dir: self.dir.clone(),
         }
+    }
+}
+
+impl<S, C, FE> BTreeLock<S, C, FE> {
+    /// Borrow the schema of the source B+ tree.
+    pub fn schema(&self) -> &S {
+        &self.schema
     }
 }
 
@@ -78,7 +87,7 @@ where
     pub fn create(schema: S, collator: C, dir: DirLock<FE>) -> Result<Self> {
         let mut nodes = dir.try_write()?;
 
-        if dir.try_read()?.is_empty() {
+        if nodes.is_empty() {
             nodes.create_file::<Node<S::Value>>(
                 ROOT.to_string(),
                 Node::Leaf(vec![]),
@@ -151,13 +160,8 @@ where
     S: Schema,
     FE: FileLoad + AsType<Node<S::Value>>,
 {
-    /// Borrow the schema of the source B+ tree.
-    pub fn schema(&self) -> &S {
-        &self.schema
-    }
-
     /// Return `true` if this B+ tree contains the given `key`.
-    pub async fn contains(&self, _key: Vec<S::Value>) -> Result<bool> {
+    pub async fn contains(&self, _key: Key<S::Value>) -> Result<bool> {
         todo!()
     }
 
@@ -167,7 +171,7 @@ where
     }
 
     /// Return `true` if the given `range` of this B+ tree contains no keys.
-    pub async fn is_empty(&self, _range: Range<S::Value>) -> Result<u64> {
+    pub async fn is_empty(&self, _range: Range<S::Value>) -> Result<bool> {
         todo!()
     }
 
@@ -175,7 +179,7 @@ where
     pub async fn to_stream(
         &self,
         _range: Range<S::Value>,
-    ) -> impl Stream<Item = Result<Vec<S::Value>>> {
+    ) -> impl Stream<Item = Result<Key<S::Value>>> {
         // TODO
         stream::empty()
     }
@@ -194,29 +198,31 @@ where
     C: Collate<Value = S::Value>,
     FE: FileLoad + AsType<Node<S::Value>>,
 {
-    /// Delete the given `key` from this B+ tree.
-    pub async fn delete(&self, _key: Vec<S::Value>) -> Result<bool> {
+    /// Delete the given `range` from this B+ tree.
+    pub async fn delete(&self, _range: Key<S::Value>) -> Result<bool> {
         todo!()
     }
 
     /// Insert the given `key` into this B+ tree.
-    pub async fn insert(&self, key: Vec<S::Value>) -> Result<bool> {
+    pub async fn insert(&self, key: Key<S::Value>) -> Result<bool> {
         let mut root = self.dir.get_file(ROOT).expect("root").write().await?;
 
         match &mut *root {
             Node::Leaf(keys) => {
                 let i = self.collator.bisect_left(&keys, &key);
-                if keys[i] == key {
+
+                if i < keys.len() && keys[i] == key {
                     // no-op
                     return Ok(false);
                 }
+
                 keys.insert(i, key);
 
                 if keys.len() == self.schema.order() {
                     unimplemented!()
                 }
             }
-            Node::Index(_children) => {
+            Node::Index(_bounds, _children) => {
                 unimplemented!("insert into index node")
             }
         };
@@ -224,20 +230,27 @@ where
         Ok(true)
     }
 
-    /// Insert all of the given `keys` into this B+ tree.
-    ///
-    /// The provided keys will be collated prior to insertion.
-    pub async fn insert_all<Keys: TryStream<Item = Vec<S::Value>>>(
-        &self,
-        _keys: Keys,
-    ) -> Result<()> {
-        todo!()
-    }
-
     /// Merge the keys in the `other` B+ tree range into this one.
     ///
     /// The source B+ tree **must** have an identical schema and collation.
-    pub async fn merge(&self, _other: BTreeReadGuard<S, C, FE>) {
+    pub async fn merge(&self, other: BTreeReadGuard<S, C, FE>) -> Result<()> {
+        if self.collator != other.collator {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "B+Tree to merge must have the same collation",
+            ));
+        }
+
+        if self.schema != other.schema {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "cannot merge a B+Tree with schema {:?} into one with schema {:?}",
+                    other.schema, self.schema
+                ),
+            ));
+        }
+
         todo!()
     }
 }
