@@ -89,11 +89,7 @@ where
         let mut nodes = dir.try_write()?;
 
         if nodes.is_empty() {
-            nodes.create_file::<Node<S::Value>>(
-                ROOT.to_string(),
-                Node::Leaf(vec![]),
-                schema.block_size(),
-            )?;
+            nodes.create_file::<Node<S::Value>>(ROOT.to_string(), Node::Leaf(vec![]), 0)?;
 
             Ok(Self::new(schema, collator, dir))
         } else {
@@ -239,7 +235,7 @@ where
                 debug_assert_eq!(bounds.len(), children.len());
 
                 let i = match self.collator.bisect_left(&bounds, &key) {
-                    0 => unimplemented!("insert a key to the left of the leftmost"),
+                    0 => 0,
                     i => i - 1,
                 };
 
@@ -260,12 +256,21 @@ where
                 .await?;
 
                 match left {
-                    None => return Ok(false),
-                    Some(left) => {
-                        bounds[i] = left;
-                        None
+                    Insert::None => return Ok(false),
+                    Insert::Right => {}
+                    Insert::Left(key) => {
+                        bounds[i] = key;
+                    }
+                    Insert::LeafOverflow(bound, child_id) => {
+                        bounds.insert(i + 1, bound);
+                        children.insert(i + 1, child_id);
+                    }
+                    Insert::IndexOverflow(_bounds, _children) => {
+                        unimplemented!("split an index node")
                     }
                 }
+
+                None
             }
         };
 
@@ -301,6 +306,14 @@ where
     }
 }
 
+enum Insert<V> {
+    None,
+    Left(Key<V>),
+    Right,
+    LeafOverflow(Key<V>, Uuid),
+    IndexOverflow(Vec<Key<V>>, Vec<Uuid>),
+}
+
 #[inline]
 fn insert<'a, FE, S, C, V>(
     dir: &'a mut DirWriteGuard<FE>,
@@ -308,7 +321,7 @@ fn insert<'a, FE, S, C, V>(
     collator: &'a C,
     node: &'a mut Node<V>,
     key: Key<V>,
-) -> Pin<Box<dyn Future<Output = Result<Option<Key<V>>>> + 'a>>
+) -> Pin<Box<dyn Future<Output = Result<Insert<V>>> + 'a>>
 where
     FE: FileLoad + AsType<Node<V>>,
     S: Schema<Value = V>,
@@ -322,17 +335,29 @@ where
 
                 if i < keys.len() && keys[i] == key {
                     // no-op
-                    return Ok(None);
+                    return Ok(Insert::None);
                 }
 
                 keys.insert(i, key);
 
+                debug_assert!(collator.is_sorted(&keys));
+
                 if keys.len() > schema.order() {
-                    // TODO:
-                    unimplemented!("split a leaf of an index node")
+                    let size = schema.block_size() / 2;
+                    let new_leaf: Vec<_> = keys.drain(div_ceil(schema.order(), 2)..).collect();
+
+                    let left_key = new_leaf[0].clone();
+                    let (new_node_id, _) = dir.create_file_unique(Node::Leaf(new_leaf), size)?;
+
+                    Ok(Insert::LeafOverflow(left_key, new_node_id))
                 } else {
                     debug_assert!(keys.len() > div_ceil(schema.order(), 2));
-                    Ok(Some(keys[0].clone()))
+
+                    if i == 0 {
+                        Ok(Insert::Left(keys[0].clone()))
+                    } else {
+                        Ok(Insert::Right)
+                    }
                 }
             }
             Node::Index(bounds, children) => {

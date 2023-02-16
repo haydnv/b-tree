@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::{fmt, io};
 
 use async_trait::async_trait;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use collate::Collator;
 use destream::{de, en};
 use freqfs::{Cache, FileLoad};
@@ -94,7 +94,9 @@ impl FileLoad for File {
                 .map_err(|cause| io::Error::new(io::ErrorKind::InvalidData, cause)),
         );
 
-        tokio::io::copy(&mut reader, file).await
+        let size = tokio::io::copy(&mut reader, file).await?;
+        assert!(size > 0);
+        Ok(size)
     }
 }
 
@@ -177,7 +179,7 @@ async fn main() -> Result<(), io::Error> {
     {
         let mut view = btree.write().await;
 
-        for i in 0..8 {
+        for i in 0..12 {
             let lo = i;
             let hi = i16::MAX - lo;
             let spread = hi - lo;
