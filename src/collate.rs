@@ -89,6 +89,7 @@ where
             Unbounded => {}
             Included(value) => match self.compare(target, value) {
                 Less => return Less,
+                Equal => return Equal,
                 _ => {}
             },
             Excluded(value) => match self.compare(target, value) {
@@ -101,6 +102,7 @@ where
             Unbounded => {}
             Included(value) => match self.compare(target, value) {
                 Greater => return Greater,
+                Equal => return Equal,
                 _ => {}
             },
             Excluded(value) => match self.compare(target, value) {

@@ -2,27 +2,34 @@
 //!
 //! See the `examples` directory for usage examples.
 
+use std::cmp::Ordering;
 use std::ops::Deref;
 use std::pin::Pin;
 use std::string::ToString;
 use std::sync::Arc;
 use std::{fmt, io};
 
-use freqfs::{Dir, DirLock, DirReadGuard, DirWriteGuard, FileLoad};
-use futures::future::{Future, FutureExt};
-use futures::stream::{self, Stream};
+use freqfs::{Dir, DirLock, DirReadGuard, DirWriteGuard, FileLoad, FileReadGuard};
+use futures::future::{self, Future, FutureExt};
+use futures::stream::{self, Stream, StreamExt, TryStreamExt};
 use safecast::AsType;
 use uuid::Uuid;
 
 mod collate;
-pub mod range;
+mod range;
 
 use crate::collate::{Collate, CollateRange};
-use crate::range::Range;
+pub use crate::range::Range;
 
-const ROOT: Uuid = Uuid::from_fields(0, 0, 0, &[0u8; 8]);
+/// A read guard acquired on a [`BTreeLock`]
+pub type BTreeReadGuard<S, C, FE> = BTree<S, C, DirReadGuard<FE>>;
+
+/// A write guard acquired on a [`BTreeLock`]
+pub type BTreeWriteGuard<S, C, FE> = BTree<S, C, DirWriteGuard<FE>>;
 
 type Key<V> = Vec<V>;
+
+const ROOT: Uuid = Uuid::from_fields(0, 0, 0, &[0u8; 8]);
 
 pub enum Node<V> {
     Index(Vec<Key<V>>, Vec<Uuid>),
@@ -35,7 +42,7 @@ pub type Result<T> = std::result::Result<T, io::Error>;
 /// The schema of a B+ tree
 pub trait Schema: Eq + fmt::Debug {
     type Error: std::error::Error;
-    type Value: Clone + Eq;
+    type Value: Clone + Eq + fmt::Debug;
 
     /// Get the maximum size in bytes of a leaf node in a B+ tree with this [`Schema`].
     fn block_size(&self) -> usize;
@@ -122,7 +129,7 @@ where
     FE: FileLoad,
 {
     /// Lock this B+ tree for reading
-    pub async fn read(&self) -> BTree<S, C, DirReadGuard<FE>> {
+    pub async fn read(&self) -> BTreeReadGuard<S, C, FE> {
         self.dir
             .read()
             .map(|dir| BTree {
@@ -134,7 +141,7 @@ where
     }
 
     /// Lock this B+ tree for writing
-    pub async fn write(&self) -> BTree<S, C, DirWriteGuard<FE>> {
+    pub async fn write(&self) -> BTreeWriteGuard<S, C, FE> {
         self.dir
             .write()
             .map(|dir| BTree {
@@ -166,8 +173,9 @@ where
     }
 
     /// Count how many keys lie within the given `range` of this B+ tree.
-    pub async fn count(&self, _range: Range<S::Value>) -> Result<u64> {
-        todo!()
+    pub async fn count(&self, range: Range<S::Value>) -> Result<u64> {
+        let root = self.dir.get_file(&ROOT).expect("root").read().await?;
+        count(&self.dir, &*self.collator, &range, root).await
     }
 
     /// Return `true` if the given `range` of this B+ tree contains no keys.
@@ -183,6 +191,59 @@ where
         // TODO
         stream::empty()
     }
+}
+
+fn count<'a, C, V, FE>(
+    dir: &'a Dir<FE>,
+    collator: &'a C,
+    range: &'a Range<V>,
+    node: FileReadGuard<FE, Node<V>>,
+) -> Pin<Box<dyn Future<Output = Result<u64>> + 'a>>
+where
+    C: Collate<Value = V>,
+    V: PartialEq + fmt::Debug + 'a,
+    FE: FileLoad + AsType<Node<V>>,
+{
+    Box::pin(async move {
+        match &*node {
+            Node::Leaf(keys) if range == &Range::default() => Ok(keys.len() as u64),
+            Node::Leaf(keys) => {
+                let (l, r) = collator.bisect(&keys, &range);
+
+                if l == r {
+                    let cmp = collator.compare_range(&keys[l], range);
+                    if cmp == Ordering::Equal {
+                        Ok(1)
+                    } else {
+                        Ok(0)
+                    }
+                } else {
+                    Ok((r - l) as u64)
+                }
+            }
+            Node::Index(bounds, children) => {
+                let (l, r) = collator.bisect(&bounds, &range);
+
+                if l == r {
+                    let node = if l == children.len() {
+                        dir.read_file(children.last().expect("last")).await?
+                    } else {
+                        dir.read_file(&children[l]).await?
+                    };
+
+                    count(dir, collator, range, node.expect("node")).await
+                } else {
+                    stream::iter(&children[l..r])
+                        .then(|node_id| dir.read_file(node_id))
+                        .map_ok(|node| node.expect("node"))
+                        .map_ok(|node| count(dir, collator, range, node))
+                        .try_buffer_unordered(num_cpus::get())
+                        .try_fold(0, |sum, count| future::ready(Ok(sum + count)))
+                        .await
+                }
+            }
+        }
+    })
 }
 
 impl<S, C, FE> BTree<S, C, DirWriteGuard<FE>>
@@ -339,7 +400,6 @@ enum Insert<V> {
     IndexOverflow(Key<V>, Uuid),
 }
 
-#[inline]
 fn insert<'a, FE, S, C, V>(
     dir: &'a mut Dir<FE>,
     schema: &'a S,

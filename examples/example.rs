@@ -13,7 +13,7 @@ use safecast::as_type;
 use tokio::fs;
 use tokio_util::io::StreamReader;
 
-use b_tree::{BTreeLock, Node, Schema};
+use b_tree::{BTreeLock, Node, Range, Schema};
 
 const BLOCK_SIZE: usize = 4_096;
 
@@ -179,11 +179,16 @@ async fn main() -> Result<(), io::Error> {
     {
         let mut view = btree.write().await;
 
-        for i in 0..250 {
+        for i in 1..250 {
             let lo = i;
             let hi = i16::MAX - lo;
             let spread = hi - lo;
-            assert!(view.insert(vec![lo, hi, spread]).await?)
+            let key = vec![lo, hi, spread];
+            assert!(view.insert(key).await?);
+
+            assert_eq!(view.count(Range::new(vec![], 0..i)).await?, (i as u64) - 1);
+            assert_eq!(view.count(Range::with_prefix(vec![i])).await?, 1);
+            assert_eq!(view.count(Range::default()).await?, i as u64);
         }
     }
 

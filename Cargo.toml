@@ -16,6 +16,7 @@ name = "example"
 collate = { path = "../collate" }
 freqfs = { path = "../freqfs" }
 futures = "0.3"
+num_cpus = "1.15"
 safecast = "0.1"
 uuid = "1.3"
 
