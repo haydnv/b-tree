@@ -38,12 +38,9 @@ pub enum Node<V> {
     Leaf(Vec<Key<V>>),
 }
 
-/// The result of a B+ tree operation
-pub type Result<T> = std::result::Result<T, io::Error>;
-
 /// The schema of a B+ tree
 pub trait Schema: Eq + fmt::Debug {
-    type Error: std::error::Error;
+    type Error: std::error::Error + From<io::Error>;
     type Value: Clone + Eq + fmt::Debug;
 
     /// Get the maximum size in bytes of a leaf node in a B+ tree with this [`Schema`].
@@ -53,8 +50,7 @@ pub trait Schema: Eq + fmt::Debug {
     fn order(&self) -> usize;
 
     /// Return a validated version of the given `key`, or a validation error.
-    fn validate(&self, key: Key<Self::Value>)
-        -> std::result::Result<Key<Self::Value>, Self::Error>;
+    fn validate(&self, key: Key<Self::Value>) -> Result<Key<Self::Value>, Self::Error>;
 }
 
 /// A lock to synchronize access to a persistent B+ tree
@@ -95,7 +91,7 @@ where
     }
 
     /// Create a new [`BTreeLock`] in `dir` with the given `collator`
-    pub fn create(schema: S, collator: C, dir: DirLock<FE>) -> Result<Self> {
+    pub fn create(schema: S, collator: C, dir: DirLock<FE>) -> Result<Self, io::Error> {
         let mut nodes = dir.try_write()?;
 
         if nodes.is_empty() {
@@ -111,7 +107,7 @@ where
     }
 
     /// Load a [`BTreeLock`] with the given `schema` and `collator` from `dir`
-    pub fn load(schema: S, collator: C, dir: DirLock<FE>) -> Result<Self> {
+    pub fn load(schema: S, collator: C, dir: DirLock<FE>) -> Result<Self, io::Error> {
         let nodes = dir.try_read()?;
 
         if let Some(root) = nodes.get_file(&ROOT) {
@@ -170,18 +166,42 @@ where
     G: Deref<Target = Dir<FE>>,
 {
     /// Return `true` if this B+ tree contains the given `key`.
-    pub async fn contains(&self, _key: Key<S::Value>) -> Result<bool> {
-        todo!()
+    pub async fn contains(&self, key: Key<S::Value>) -> Result<bool, S::Error> {
+        let key = self.schema.validate(key)?;
+        let mut node = self.dir.read_file(&ROOT).await?;
+
+        loop {
+            match &*node {
+                Node::Leaf(keys) => {
+                    let i = self.collator.bisect_left(&keys, &key);
+
+                    break Ok(match keys.get(i) {
+                        Some(present) => present == &key,
+                        _ => false,
+                    });
+                }
+                Node::Index(bounds, children) => {
+                    let i = match self.collator.bisect_left(&bounds, &key) {
+                        i if i == children.len() => i - 1,
+                        i => i,
+                    };
+
+                    node = self.dir.read_file(&children[i]).await?;
+                }
+            }
+        }
     }
 
     /// Count how many keys lie within the given `range` of this B+ tree.
-    pub async fn count(&self, range: Range<S::Value>) -> Result<u64> {
-        let root = self.dir.get_file(&ROOT).expect("root").read().await?;
-        count(&self.dir, &*self.collator, &range, root).await
+    pub async fn count(&self, range: Range<S::Value>) -> Result<u64, S::Error> {
+        let root = self.dir.read_file(&ROOT).await?;
+        count(&self.dir, &*self.collator, &range, root)
+            .map_err(S::Error::from)
+            .await
     }
 
     /// Return `true` if the given `range` of this B+ tree contains no keys.
-    pub async fn is_empty(&self, _range: Range<S::Value>) -> Result<bool> {
+    pub async fn is_empty(&self, _range: Range<S::Value>) -> Result<bool, S::Error> {
         todo!()
     }
 
@@ -189,7 +209,7 @@ where
     pub async fn to_stream(
         &self,
         _range: Range<S::Value>,
-    ) -> impl Stream<Item = Result<Key<S::Value>>> {
+    ) -> impl Stream<Item = Result<Key<S::Value>, S::Error>> {
         // TODO
         stream::empty()
     }
@@ -200,7 +220,7 @@ fn count<'a, C, V, FE>(
     collator: &'a C,
     range: &'a Range<V>,
     node: FileReadGuard<FE, Node<V>>,
-) -> Pin<Box<dyn Future<Output = Result<u64>> + 'a>>
+) -> Pin<Box<dyn Future<Output = Result<u64, io::Error>> + 'a>>
 where
     C: Collate<Value = V>,
     V: PartialEq + fmt::Debug + 'a,
@@ -228,17 +248,17 @@ where
 
                 if l == children.len() {
                     let node = dir.read_file(children.last().expect("last")).await?;
-                    count(dir, collator, range, node.expect("node")).await
+                    count(dir, collator, range, node).await
                 } else if l == r {
                     let node = dir.read_file(&children[l]).await?;
-                    count(dir, collator, range, node.expect("node")).await
+                    count(dir, collator, range, node).await
                 } else if l + 1 == r {
                     let (left, right) =
                         try_join!(dir.read_file(&children[l]), dir.read_file(&children[r]))?;
 
                     let (l_count, r_count) = try_join!(
-                        count(dir, collator, range, left.expect("left")),
-                        count(dir, collator, range, right.expect("right"))
+                        count(dir, collator, range, left),
+                        count(dir, collator, range, right)
                     )?;
 
                     Ok(l_count + r_count)
@@ -247,21 +267,18 @@ where
 
                     let left = dir
                         .read_file(&children[l])
-                        .map_ok(|node| node.expect("left"))
                         .and_then(|node| count(dir, collator, range, node));
 
                     let default_range = Range::default();
 
                     let middle = stream::iter(&children[(l + 1)..r])
                         .then(|node_id| dir.read_file(node_id))
-                        .map_ok(|node| node.expect("node"))
                         .map_ok(|node| count(dir, collator, &default_range, node))
                         .try_buffer_unordered(num_cpus::get())
                         .try_fold(0, |sum, count| future::ready(Ok(sum + count)));
 
                     let right = dir
                         .read_file(&children[r])
-                        .map_ok(|node| node.expect("right"))
                         .and_then(|node| count(dir, collator, range, node));
 
                     let (left, middle, right) = try_join!(left, middle, right)?;
@@ -279,14 +296,16 @@ where
     FE: FileLoad + AsType<Node<S::Value>>,
 {
     /// Delete the given `range` from this B+ tree.
-    pub async fn delete(&mut self, _range: Key<S::Value>) -> Result<bool> {
+    pub async fn delete(&mut self, _range: Key<S::Value>) -> Result<bool, S::Error> {
         todo!()
     }
 
     /// Insert the given `key` into this B+ tree.
-    pub async fn insert(&mut self, key: Key<S::Value>) -> Result<bool> {
+    pub async fn insert(&mut self, key: Key<S::Value>) -> Result<bool, S::Error> {
+        let key = self.schema.validate(key)?;
+
         let order = self.schema.order();
-        let mut root = self.dir.get_file(&ROOT).expect("root").write().await?;
+        let mut root = self.dir.write_file(&ROOT).await?;
 
         let new_root = match &mut *root {
             Node::Leaf(keys) => {
@@ -325,12 +344,7 @@ where
                     i => i - 1,
                 };
 
-                let mut child = self
-                    .dir
-                    .get_file(&children[i])
-                    .expect("node")
-                    .write()
-                    .await?;
+                let mut child = self.dir.write_file(&children[i]).await?;
 
                 let result = insert(
                     &mut self.dir,
@@ -396,12 +410,13 @@ where
     /// Merge the keys in the `other` B+ tree range into this one.
     ///
     /// The source B+ tree **must** have an identical schema and collation.
-    pub async fn merge(&mut self, other: BTree<S, C, FE>) -> Result<()> {
+    pub async fn merge(&mut self, other: BTree<S, C, FE>) -> Result<(), S::Error> {
         if self.collator != other.collator {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "B+Tree to merge must have the same collation",
-            ));
+            )
+            .into());
         }
 
         if self.schema != other.schema {
@@ -411,7 +426,8 @@ where
                     "cannot merge a B+Tree with schema {:?} into one with schema {:?}",
                     other.schema, self.schema
                 ),
-            ));
+            )
+            .into());
         }
 
         todo!()
@@ -432,7 +448,7 @@ fn insert<'a, FE, S, C, V>(
     collator: &'a C,
     node: &'a mut Node<V>,
     key: Key<V>,
-) -> Pin<Box<dyn Future<Output = Result<Insert<V>>> + 'a>>
+) -> Pin<Box<dyn Future<Output = Result<Insert<V>, io::Error>> + 'a>>
 where
     FE: FileLoad + AsType<Node<V>>,
     S: Schema<Value = V>,
@@ -481,7 +497,7 @@ where
                     i => i - 1,
                 };
 
-                let mut child = dir.get_file(&children[i]).expect("node").write().await?;
+                let mut child = dir.write_file(&children[i]).await?;
 
                 let result = insert(dir, schema, collator, &mut child, key).await?;
 
