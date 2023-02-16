@@ -179,6 +179,8 @@ async fn main() -> Result<(), io::Error> {
     {
         let mut view = btree.write().await;
 
+        assert!(view.is_empty(Range::default()).await?);
+
         for i in 1..250 {
             let lo = i;
             let hi = i16::MAX - lo;
@@ -186,8 +188,11 @@ async fn main() -> Result<(), io::Error> {
 
             let key = vec![lo, hi, spread];
             assert!(!view.contains(key.clone()).await?);
+            assert!(view.is_empty(Range::with_prefix(vec![i])).await?);
             assert!(view.insert(key.clone()).await?);
             assert!(view.contains(key).await?);
+            assert!(!view.is_empty(Range::with_prefix(vec![i])).await?);
+            assert!(!view.is_empty(Range::default()).await?);
 
             assert_eq!(view.count(Range::new(vec![], 0..i)).await?, (i as u64) - 1);
             assert_eq!(view.count(Range::with_prefix(vec![i])).await?, 1);

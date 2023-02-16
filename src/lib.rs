@@ -201,8 +201,28 @@ where
     }
 
     /// Return `true` if the given `range` of this B+ tree contains no keys.
-    pub async fn is_empty(&self, _range: Range<S::Value>) -> Result<bool, S::Error> {
-        todo!()
+    pub async fn is_empty(&self, range: Range<S::Value>) -> Result<bool, S::Error> {
+        let mut node = self.dir.read_file(&ROOT).await?;
+
+        Ok(loop {
+            match &*node {
+                Node::Leaf(keys) => {
+                    let (l, r) = self.collator.bisect(&keys, &range);
+                    break l == r;
+                }
+                Node::Index(bounds, children) => {
+                    let (l, r) = self.collator.bisect(&bounds, &range);
+
+                    if l == children.len() {
+                        node = self.dir.read_file(&children[l - 1]).await?;
+                    } else if l == r {
+                        node = self.dir.read_file(&children[l]).await?;
+                    } else {
+                        break false;
+                    }
+                }
+            }
+        })
     }
 
     /// Read all the keys in the given `range` of this B+ tree.
