@@ -12,6 +12,8 @@ use std::{fmt, io};
 use freqfs::{Dir, DirLock, DirReadGuard, DirWriteGuard, FileLoad, FileReadGuard};
 use futures::future::{self, Future, FutureExt};
 use futures::stream::{self, Stream, StreamExt, TryStreamExt};
+use futures::try_join;
+use futures::TryFutureExt;
 use safecast::AsType;
 use uuid::Uuid;
 
@@ -224,22 +226,46 @@ where
             Node::Index(bounds, children) => {
                 let (l, r) = collator.bisect(&bounds, &range);
 
-                if l == r {
-                    let node = if l == children.len() {
-                        dir.read_file(children.last().expect("last")).await?
-                    } else {
-                        dir.read_file(&children[l]).await?
-                    };
-
+                if l == children.len() {
+                    let node = dir.read_file(children.last().expect("last")).await?;
                     count(dir, collator, range, node.expect("node")).await
+                } else if l == r {
+                    let node = dir.read_file(&children[l]).await?;
+                    count(dir, collator, range, node.expect("node")).await
+                } else if l + 1 == r {
+                    let (left, right) =
+                        try_join!(dir.read_file(&children[l]), dir.read_file(&children[r]))?;
+
+                    let (l_count, r_count) = try_join!(
+                        count(dir, collator, range, left.expect("left")),
+                        count(dir, collator, range, right.expect("right"))
+                    )?;
+
+                    Ok(l_count + r_count)
                 } else {
-                    stream::iter(&children[l..r])
+                    let r = if r == children.len() { r - 1 } else { r };
+
+                    let left = dir
+                        .read_file(&children[l])
+                        .map_ok(|node| node.expect("left"))
+                        .and_then(|node| count(dir, collator, range, node));
+
+                    let default_range = Range::default();
+
+                    let middle = stream::iter(&children[(l + 1)..r])
                         .then(|node_id| dir.read_file(node_id))
                         .map_ok(|node| node.expect("node"))
-                        .map_ok(|node| count(dir, collator, range, node))
+                        .map_ok(|node| count(dir, collator, &default_range, node))
                         .try_buffer_unordered(num_cpus::get())
-                        .try_fold(0, |sum, count| future::ready(Ok(sum + count)))
-                        .await
+                        .try_fold(0, |sum, count| future::ready(Ok(sum + count)));
+
+                    let right = dir
+                        .read_file(&children[r])
+                        .map_ok(|node| node.expect("right"))
+                        .and_then(|node| count(dir, collator, range, node));
+
+                    let (left, middle, right) = try_join!(left, middle, right)?;
+                    Ok(left + middle + right)
                 }
             }
         }
