@@ -2,12 +2,13 @@
 //!
 //! See the `examples` directory for usage examples.
 
+use std::ops::Deref;
 use std::pin::Pin;
 use std::string::ToString;
 use std::sync::Arc;
 use std::{fmt, io};
 
-use freqfs::{DirLock, DirReadGuard, DirWriteGuard, FileLoad};
+use freqfs::{Dir, DirLock, DirReadGuard, DirWriteGuard, FileLoad};
 use futures::future::{Future, FutureExt};
 use futures::stream::{self, Stream};
 use safecast::AsType;
@@ -121,10 +122,10 @@ where
     FE: FileLoad,
 {
     /// Lock this B+ tree for reading
-    pub async fn read(&self) -> BTreeReadGuard<S, C, FE> {
+    pub async fn read(&self) -> BTree<S, C, DirReadGuard<FE>> {
         self.dir
             .read()
-            .map(|dir| BTreeReadGuard {
+            .map(|dir| BTree {
                 schema: self.schema.clone(),
                 collator: self.collator.clone(),
                 dir,
@@ -133,10 +134,10 @@ where
     }
 
     /// Lock this B+ tree for writing
-    pub async fn write(&self) -> BTreeWriteGuard<S, C, FE> {
+    pub async fn write(&self) -> BTree<S, C, DirWriteGuard<FE>> {
         self.dir
             .write()
-            .map(|dir| BTreeWriteGuard {
+            .map(|dir| BTree {
                 schema: self.schema.clone(),
                 collator: self.collator.clone(),
                 dir,
@@ -145,17 +146,19 @@ where
     }
 }
 
-/// A read-only view of a B+ tree
-pub struct BTreeReadGuard<S, C, FE> {
+/// A B+ tree
+pub struct BTree<S, C, D> {
     schema: Arc<S>,
     collator: Arc<C>,
-    dir: DirReadGuard<FE>,
+    dir: D,
 }
 
-impl<S, C, FE> BTreeReadGuard<S, C, FE>
+impl<S, C, FE, G> BTree<S, C, G>
 where
     S: Schema,
+    C: Collate<Value = S::Value>,
     FE: FileLoad + AsType<Node<S::Value>>,
+    G: Deref<Target = Dir<FE>>,
 {
     /// Return `true` if this B+ tree contains the given `key`.
     pub async fn contains(&self, _key: Key<S::Value>) -> Result<bool> {
@@ -182,21 +185,14 @@ where
     }
 }
 
-/// A mutable view of a B+ tree
-pub struct BTreeWriteGuard<S, C, FE> {
-    schema: Arc<S>,
-    collator: Arc<C>,
-    dir: DirWriteGuard<FE>,
-}
-
-impl<S, C, FE> BTreeWriteGuard<S, C, FE>
+impl<S, C, FE> BTree<S, C, DirWriteGuard<FE>>
 where
     S: Schema,
     C: Collate<Value = S::Value>,
     FE: FileLoad + AsType<Node<S::Value>>,
 {
     /// Delete the given `range` from this B+ tree.
-    pub async fn delete(&self, _range: Key<S::Value>) -> Result<bool> {
+    pub async fn delete(&mut self, _range: Key<S::Value>) -> Result<bool> {
         todo!()
     }
 
@@ -215,6 +211,8 @@ where
                 }
 
                 keys.insert(i, key);
+
+                debug_assert!(self.collator.is_sorted(&keys));
 
                 if keys.len() > order {
                     let size = self.schema.block_size() / 2;
@@ -272,7 +270,9 @@ where
                     }
                 }
 
+                debug_assert!(self.collator.is_sorted(&bounds));
                 debug_assert_eq!(bounds.len(), children.len());
+
                 if bounds.len() > order {
                     let size = self.schema.block_size() / 2;
                     let right_bounds: Vec<_> = bounds.drain(div_ceil(order, 2)..).collect();
@@ -309,7 +309,7 @@ where
     /// Merge the keys in the `other` B+ tree range into this one.
     ///
     /// The source B+ tree **must** have an identical schema and collation.
-    pub async fn merge(&self, other: BTreeReadGuard<S, C, FE>) -> Result<()> {
+    pub async fn merge(&mut self, other: BTree<S, C, FE>) -> Result<()> {
         if self.collator != other.collator {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -341,7 +341,7 @@ enum Insert<V> {
 
 #[inline]
 fn insert<'a, FE, S, C, V>(
-    dir: &'a mut DirWriteGuard<FE>,
+    dir: &'a mut Dir<FE>,
     schema: &'a S,
     collator: &'a C,
     node: &'a mut Node<V>,
@@ -404,6 +404,7 @@ where
                     Insert::Right => Insert::Right,
                     Insert::Left(key) => {
                         bounds[i] = key;
+
                         if i == 0 {
                             Insert::Left(bounds[i].clone())
                         } else {
