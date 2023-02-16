@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::{fmt, io};
 
 use async_trait::async_trait;
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use collate::Collator;
 use destream::{de, en};
 use freqfs::{Cache, FileLoad};
@@ -179,7 +179,7 @@ async fn main() -> Result<(), io::Error> {
     {
         let mut view = btree.write().await;
 
-        for i in 0..12 {
+        for i in 0..250 {
             let lo = i;
             let hi = i16::MAX - lo;
             let spread = hi - lo;

@@ -202,6 +202,7 @@ where
 
     /// Insert the given `key` into this B+ tree.
     pub async fn insert(&mut self, key: Key<S::Value>) -> Result<bool> {
+        let order = self.schema.order();
         let mut root = self.dir.get_file(&ROOT).expect("root").write().await?;
 
         let new_root = match &mut *root {
@@ -215,9 +216,9 @@ where
 
                 keys.insert(i, key);
 
-                if keys.len() > self.schema.order() {
+                if keys.len() > order {
                     let size = self.schema.block_size() / 2;
-                    let right: Vec<_> = keys.drain(div_ceil(self.schema.order(), 2)..).collect();
+                    let right: Vec<_> = keys.drain(div_ceil(order, 2)..).collect();
                     let left: Vec<_> = keys.drain(..).collect();
 
                     let left_key = left[0].clone();
@@ -246,7 +247,7 @@ where
                     .write()
                     .await?;
 
-                let left = insert(
+                let result = insert(
                     &mut self.dir,
                     &*self.schema,
                     &*self.collator,
@@ -255,7 +256,7 @@ where
                 )
                 .await?;
 
-                match left {
+                match result {
                     Insert::None => return Ok(false),
                     Insert::Right => {}
                     Insert::Left(key) => {
@@ -265,12 +266,36 @@ where
                         bounds.insert(i + 1, bound);
                         children.insert(i + 1, child_id);
                     }
-                    Insert::IndexOverflow(_bounds, _children) => {
-                        unimplemented!("split an index node")
+                    Insert::IndexOverflow(bound, child_id) => {
+                        bounds.insert(i + 1, bound);
+                        children.insert(i + 1, child_id);
                     }
                 }
 
-                None
+                debug_assert_eq!(bounds.len(), children.len());
+                if bounds.len() > order {
+                    let size = self.schema.block_size() / 2;
+                    let right_bounds: Vec<_> = bounds.drain(div_ceil(order, 2)..).collect();
+                    let right_children: Vec<_> = children.drain(div_ceil(order, 2)..).collect();
+                    let right_bound = right_bounds[0].clone();
+                    let (right_node_id, _) = self
+                        .dir
+                        .create_file_unique(Node::Index(right_bounds, right_children), size)?;
+
+                    let left_bounds: Vec<_> = bounds.drain(..).collect();
+                    let left_children: Vec<_> = children.drain(..).collect();
+                    let left_bound = left_bounds[0].clone();
+                    let (left_node_id, _) = self
+                        .dir
+                        .create_file_unique(Node::Index(left_bounds, left_children), size)?;
+
+                    Some(Node::Index(
+                        vec![left_bound, right_bound],
+                        vec![left_node_id, right_node_id],
+                    ))
+                } else {
+                    None
+                }
             }
         };
 
@@ -311,7 +336,7 @@ enum Insert<V> {
     Left(Key<V>),
     Right,
     LeafOverflow(Key<V>, Uuid),
-    IndexOverflow(Vec<Key<V>>, Vec<Uuid>),
+    IndexOverflow(Key<V>, Uuid),
 }
 
 #[inline]
@@ -363,9 +388,75 @@ where
             Node::Index(bounds, children) => {
                 debug_assert_eq!(bounds.len(), children.len());
                 debug_assert!(children.len() > div_ceil(schema.order(), 2) - 1);
-                debug_assert!(children.len() < schema.order());
+                debug_assert!(children.len() <= schema.order());
 
-                unimplemented!("insert into an index node");
+                let i = match collator.bisect_left(&bounds, &key) {
+                    0 => 0,
+                    i => i - 1,
+                };
+
+                let mut child = dir.get_file(&children[i]).expect("node").write().await?;
+
+                let result = insert(dir, schema, collator, &mut child, key).await?;
+
+                let result = match result {
+                    Insert::None => Insert::None,
+                    Insert::Right => Insert::Right,
+                    Insert::Left(key) => {
+                        bounds[i] = key;
+                        if i == 0 {
+                            Insert::Left(bounds[i].clone())
+                        } else {
+                            Insert::Right
+                        }
+                    }
+                    Insert::LeafOverflow(bound, child_id) => {
+                        bounds.insert(i + 1, bound);
+                        children.insert(i + 1, child_id);
+
+                        if children.len() > schema.order() {
+                            let new_bounds: Vec<_> =
+                                bounds.drain(div_ceil(schema.order(), 2)..).collect();
+
+                            let new_children: Vec<_> =
+                                children.drain(div_ceil(schema.order(), 2)..).collect();
+
+                            let left_bound = new_bounds[0].clone();
+                            let (node_id, _) = dir.create_file_unique(
+                                Node::Index(new_bounds, new_children),
+                                schema.block_size() / 2,
+                            )?;
+
+                            Insert::IndexOverflow(left_bound, node_id)
+                        } else {
+                            Insert::Right
+                        }
+                    }
+                    Insert::IndexOverflow(bound, child_id) => {
+                        bounds.insert(i + 1, bound);
+                        children.insert(i + 1, child_id);
+
+                        if children.len() > schema.order() {
+                            let new_bounds: Vec<_> =
+                                bounds.drain(div_ceil(schema.order(), 2)..).collect();
+
+                            let new_children: Vec<_> =
+                                children.drain(div_ceil(schema.order(), 2)..).collect();
+
+                            let left_bound = new_bounds[0].clone();
+                            let (node_id, _) = dir.create_file_unique(
+                                Node::Index(new_bounds, new_children),
+                                schema.block_size() / 2,
+                            )?;
+
+                            Insert::IndexOverflow(left_bound, node_id)
+                        } else {
+                            Insert::Right
+                        }
+                    }
+                };
+
+                Ok(result)
             }
         }
     })
