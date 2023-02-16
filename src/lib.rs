@@ -14,7 +14,7 @@ pub use tree::{BTree, BTreeLock, BTreeReadGuard, BTreeWriteGuard, Node};
 /// The schema of a B+ tree
 pub trait Schema: Eq + fmt::Debug {
     type Error: std::error::Error + From<io::Error>;
-    type Value: Clone + Eq + fmt::Debug;
+    type Value: Clone + Eq + fmt::Debug + 'static;
 
     /// Get the maximum size in bytes of a leaf node in a B+ tree with this [`Schema`].
     fn block_size(&self) -> usize;

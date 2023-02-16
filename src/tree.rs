@@ -140,9 +140,9 @@ pub struct BTree<S, C, D> {
 impl<S, C, FE, G> BTree<S, C, G>
 where
     S: Schema,
-    C: Collate<Value = S::Value>,
+    C: Collate<Value = S::Value> + 'static,
     FE: FileLoad + AsType<Node<S::Value>>,
-    G: Deref<Target = Dir<FE>>,
+    G: Deref<Target = Dir<FE>> + 'static,
 {
     /// Return `true` if this B+ tree contains the given `key`.
     pub async fn contains(&self, key: Key<S::Value>) -> Result<bool, S::Error> {
@@ -205,12 +205,12 @@ where
     }
 
     /// Read all the keys in the given `range` of this B+ tree.
-    pub fn to_stream(
-        &self,
-        _range: Range<S::Value>,
-    ) -> impl Stream<Item = Result<&Key<S::Value>, S::Error>> {
-        // TODO
-        stream::empty()
+    pub fn into_stream(
+        self,
+        range: Range<S::Value>,
+    ) -> impl Stream<Item = Result<Key<S::Value>, io::Error>> + Sized {
+        assert_eq!(range, Range::default()); // TODO: support range limits
+        into_stream(Arc::new(self.dir), self.collator, Arc::new(range), ROOT)
     }
 }
 
@@ -286,6 +286,42 @@ where
             }
         }
     })
+}
+
+fn into_stream<C, V, FE, G>(
+    dir: Arc<G>,
+    collator: Arc<C>,
+    range: Arc<Range<V>>,
+    node_id: Uuid,
+) -> impl Stream<Item = Result<Key<V>, io::Error>> + Sized
+where
+    C: 'static,
+    V: Clone + 'static,
+    FE: FileLoad + AsType<Node<V>>,
+    G: Deref<Target = Dir<FE>> + 'static,
+{
+    let file = dir.get_file(&node_id).expect("node");
+    let fut = file.into_read().map_ok(move |node| {
+        let keys: Pin<Box<dyn Stream<Item = Result<Key<V>, io::Error>>>> = match &*node {
+            Node::Leaf(keys) => {
+                let keys = stream::iter(keys.to_vec().into_iter().map(Ok));
+                Box::pin(keys)
+            }
+            Node::Index(_bounds, children) => {
+                let keys = stream::iter(children.to_vec())
+                    .map(move |node_id| {
+                        into_stream(dir.clone(), collator.clone(), range.clone(), node_id)
+                    })
+                    .flatten();
+
+                Box::pin(keys)
+            }
+        };
+
+        keys
+    });
+
+    stream::once(fut).try_flatten()
 }
 
 impl<S, C, FE> BTree<S, C, DirWriteGuard<FE>>
