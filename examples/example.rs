@@ -198,6 +198,20 @@ async fn main() -> Result<(), io::Error> {
             assert_eq!(view.count(Range::with_prefix(vec![i])).await?, 1);
             assert_eq!(view.count(Range::default()).await?, i as u64);
         }
+
+        let mut i = 1;
+        let mut keys = view.into_stream(Range::new(vec![], 0..123));
+        while let Some(key) = keys.try_next().await? {
+            assert_eq!(key[0], i);
+            i += 1;
+        }
+
+        let view = btree.read().await;
+        let mut keys = view.into_stream(Range::new(vec![], 123..250));
+        while let Some(key) = keys.try_next().await? {
+            assert_eq!(key[0], i);
+            i += 1;
+        }
     }
 
     // clean up

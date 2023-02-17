@@ -209,7 +209,6 @@ where
         self,
         range: Range<S::Value>,
     ) -> impl Stream<Item = Result<Key<S::Value>, io::Error>> + Sized {
-        assert_eq!(range, Range::default()); // TODO: support range limits
         into_stream(Arc::new(self.dir), self.collator, Arc::new(range), ROOT)
     }
 }
@@ -248,7 +247,7 @@ where
                 if l == children.len() {
                     let node = dir.read_file(children.last().expect("last")).await?;
                     count(dir, collator, range, node).await
-                } else if l == r {
+                } else if l == r || (r == children.len() && l + 1 == r) {
                     let node = dir.read_file(&children[l]).await?;
                     count(dir, collator, range, node).await
                 } else if l + 1 == r {
@@ -295,33 +294,76 @@ fn into_stream<C, V, FE, G>(
     node_id: Uuid,
 ) -> impl Stream<Item = Result<Key<V>, io::Error>> + Sized
 where
-    C: 'static,
-    V: Clone + 'static,
+    C: Collate<Value = V> + 'static,
+    V: Clone + PartialEq + 'static,
     FE: FileLoad + AsType<Node<V>>,
     G: Deref<Target = Dir<FE>> + 'static,
 {
     let file = dir.get_file(&node_id).expect("node");
     let fut = file.into_read().map_ok(move |node| {
         let keys: Pin<Box<dyn Stream<Item = Result<Key<V>, io::Error>>>> = match &*node {
-            Node::Leaf(keys) => {
+            Node::Leaf(keys) if *range == Range::default() => {
                 let keys = stream::iter(keys.to_vec().into_iter().map(Ok));
                 Box::pin(keys)
             }
-            Node::Index(_bounds, children) => {
-                let keys = stream::iter(children.to_vec())
-                    .map(move |node_id| {
-                        into_stream(dir.clone(), collator.clone(), range.clone(), node_id)
-                    })
-                    .flatten();
+            Node::Leaf(keys) => {
+                let (l, r) = collator.bisect(&keys, &range);
 
-                Box::pin(keys)
+                if l == r {
+                    let cmp = collator.compare_range(&keys[l], &*range);
+                    if cmp == Ordering::Equal {
+                        Box::pin(stream::once(future::ready(Ok(keys[l].to_vec()))))
+                    } else {
+                        Box::pin(stream::empty())
+                    }
+                } else {
+                    Box::pin(stream::iter(keys[l..r].to_vec().into_iter().map(Ok)))
+                }
+            }
+            Node::Index(bounds, children) => {
+                let (l, r) = collator.bisect(&bounds, &range);
+
+                if l == children.len() {
+                    into_stream(dir, collator, range, children[l - 1])
+                } else if l == r || (r == children.len() && l + 1 == r) {
+                    into_stream(dir, collator, range, children[l])
+                } else if l + 1 == r {
+                    let left =
+                        into_stream(dir.clone(), collator.clone(), range.clone(), children[l]);
+
+                    let right = into_stream(dir, collator, range, children[r]);
+
+                    Box::pin(left.chain(right))
+                } else {
+                    let r = if r == children.len() { r - 1 } else { r };
+
+                    let left =
+                        into_stream(dir.clone(), collator.clone(), range.clone(), children[l]);
+
+                    let right = into_stream(dir.clone(), collator.clone(), range, children[r]);
+
+                    let default_range = Arc::new(Range::default());
+
+                    let middle = stream::iter(children[(l + 1)..r].to_vec())
+                        .map(move |node_id| {
+                            into_stream(
+                                dir.clone(),
+                                collator.clone(),
+                                default_range.clone(),
+                                node_id,
+                            )
+                        })
+                        .flatten();
+
+                    Box::pin(left.chain(middle).chain(right))
+                }
             }
         };
 
         keys
     });
 
-    stream::once(fut).try_flatten()
+    Box::pin(stream::once(fut).try_flatten())
 }
 
 impl<S, C, FE> BTree<S, C, DirWriteGuard<FE>>
