@@ -217,7 +217,7 @@ fn count<'a, C, V, FE>(
     dir: &'a Dir<FE>,
     collator: &'a C,
     range: &'a Range<V>,
-    node: FileReadGuard<FE, Node<V>>,
+    node: FileReadGuard<'a, Node<V>>,
 ) -> Pin<Box<dyn Future<Output = Result<u64, io::Error>> + 'a>>
 where
     C: Collate<Value = V>,
@@ -230,7 +230,9 @@ where
             Node::Leaf(keys) => {
                 let (l, r) = collator.bisect(&keys, &range);
 
-                if l == r {
+                if l == keys.len() {
+                    Ok(0)
+                } else if l == r {
                     let cmp = collator.compare_range(&keys[l], range);
                     if cmp == Ordering::Equal {
                         Ok(1)
@@ -299,7 +301,7 @@ where
     FE: FileLoad + AsType<Node<V>>,
     G: Deref<Target = Dir<FE>> + 'static,
 {
-    let file = dir.get_file(&node_id).expect("node");
+    let file = dir.get_file(&node_id).expect("node").clone();
     let fut = file.into_read().map_ok(move |node| {
         let keys: Pin<Box<dyn Stream<Item = Result<Key<V>, io::Error>>>> = match &*node {
             Node::Leaf(keys) if *range == Range::default() => {
@@ -309,7 +311,9 @@ where
             Node::Leaf(keys) => {
                 let (l, r) = collator.bisect(&keys, &range);
 
-                if l == r {
+                if l == keys.len() {
+                    Box::pin(stream::empty())
+                } else if l == r {
                     let cmp = collator.compare_range(&keys[l], &*range);
                     if cmp == Ordering::Equal {
                         Box::pin(stream::once(future::ready(Ok(keys[l].to_vec()))))
@@ -382,7 +386,7 @@ where
         let key = self.schema.validate(key)?;
 
         let order = self.schema.order();
-        let mut root = self.dir.write_file(&ROOT).await?;
+        let mut root = self.dir.write_file_owned(&ROOT).await?;
 
         let new_root = match &mut *root {
             Node::Leaf(keys) => {
@@ -421,7 +425,7 @@ where
                     i => i - 1,
                 };
 
-                let mut child = self.dir.write_file(&children[i]).await?;
+                let mut child = self.dir.write_file_owned(&children[i]).await?;
 
                 let result = insert(
                     &mut self.dir,
@@ -574,7 +578,7 @@ where
                     i => i - 1,
                 };
 
-                let mut child = dir.write_file(&children[i]).await?;
+                let mut child = dir.write_file_owned(&children[i]).await?;
 
                 let result = insert(dir, schema, collator, &mut child, key).await?;
 
