@@ -282,9 +282,7 @@ where
 {
     Box::pin(async move {
         match &*node {
-            Node::Leaf(keys) if range == &Range::default() => {
-                Ok(keys.len() as u64)
-            }
+            Node::Leaf(keys) if range == &Range::default() => Ok(keys.len() as u64),
             Node::Leaf(keys) => {
                 let (l, r) = collator.bisect(&keys, &range);
 
@@ -571,11 +569,12 @@ where
                     Insert::Left(key) => {
                         bounds[i] = key;
                     }
-                    Insert::LeafOverflow(bound, child_id) => {
-                        bounds.insert(i + 1, bound);
+                    Insert::LeftOverflow(left, middle, child_id) => {
+                        bounds[i] = left;
+                        bounds.insert(i + 1, middle);
                         children.insert(i + 1, child_id);
                     }
-                    Insert::IndexOverflow(bound, child_id) => {
+                    Insert::Overflow(bound, child_id) => {
                         bounds.insert(i + 1, bound);
                         children.insert(i + 1, child_id);
                     }
@@ -648,8 +647,8 @@ enum Insert<V> {
     None,
     Left(Key<V>),
     Right,
-    LeafOverflow(Key<V>, Uuid),
-    IndexOverflow(Key<V>, Uuid),
+    LeftOverflow(Key<V>, Key<V>, Uuid),
+    Overflow(Key<V>, Uuid),
 }
 
 fn insert<'a, FE, S, C, V>(
@@ -683,10 +682,18 @@ where
                     let size = schema.block_size() / 2;
                     let new_leaf: Vec<_> = keys.drain(div_ceil(schema.order(), 2)..).collect();
 
-                    let left_key = new_leaf[0].clone();
+                    let middle_key = new_leaf[0].clone();
                     let (new_node_id, _) = dir.create_file_unique(Node::Leaf(new_leaf), size)?;
 
-                    Ok(Insert::LeafOverflow(left_key, new_node_id))
+                    if i == 0 {
+                        Ok(Insert::LeftOverflow(
+                            keys[0].clone(),
+                            middle_key,
+                            new_node_id,
+                        ))
+                    } else {
+                        Ok(Insert::Overflow(middle_key, new_node_id))
+                    }
                 } else {
                     debug_assert!(keys.len() > div_ceil(schema.order(), 2));
 
@@ -723,8 +730,9 @@ where
                             Insert::Right
                         }
                     }
-                    Insert::LeafOverflow(bound, child_id) => {
-                        bounds.insert(i + 1, bound);
+                    Insert::LeftOverflow(left, middle, child_id) => {
+                        bounds[i] = left;
+                        bounds.insert(i + 1, middle);
                         children.insert(i + 1, child_id);
 
                         if children.len() > schema.order() {
@@ -740,12 +748,14 @@ where
                                 schema.block_size() / 2,
                             )?;
 
-                            Insert::IndexOverflow(left_bound, node_id)
+                            Insert::Overflow(left_bound, node_id)
+                        } else if i == 0 {
+                            Insert::Left(bounds[0].clone())
                         } else {
                             Insert::Right
                         }
                     }
-                    Insert::IndexOverflow(bound, child_id) => {
+                    Insert::Overflow(bound, child_id) => {
                         bounds.insert(i + 1, bound);
                         children.insert(i + 1, child_id);
 
@@ -762,7 +772,7 @@ where
                                 schema.block_size() / 2,
                             )?;
 
-                            Insert::IndexOverflow(left_bound, node_id)
+                            Insert::Overflow(left_bound, node_id)
                         } else {
                             Insert::Right
                         }
