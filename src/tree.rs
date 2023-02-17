@@ -5,9 +5,7 @@ use std::string::ToString;
 use std::sync::Arc;
 use std::{fmt, io};
 
-use freqfs::{
-    Dir, DirLock, DirReadGuard, DirWriteGuard, FileLoad, FileReadGuard, FileReadGuardOwned,
-};
+use freqfs::*;
 use futures::future::{self, Future, FutureExt};
 use futures::stream::{self, Stream, StreamExt, TryStreamExt};
 use futures::try_join;
@@ -20,10 +18,10 @@ use super::range::Range;
 use super::Schema;
 
 /// A read guard acquired on a [`BTreeLock`]
-pub type BTreeReadGuard<S, C, FE> = BTree<S, C, DirReadGuard<FE>>;
+pub type BTreeReadGuard<S, C, FE> = BTree<S, C, DirReadGuardOwned<FE>>;
 
 /// A write guard acquired on a [`BTreeLock`]
-pub type BTreeWriteGuard<S, C, FE> = BTree<S, C, DirWriteGuard<FE>>;
+pub type BTreeWriteGuard<S, C, FE> = BTree<S, C, DirWriteGuardOwned<FE>>;
 
 type Key<V> = Vec<V>;
 
@@ -111,7 +109,7 @@ where
 
     /// Create a new [`BTreeLock`] in `dir` with the given `collator`
     pub fn create(schema: S, collator: C, dir: DirLock<FE>) -> Result<Self, io::Error> {
-        let mut nodes = dir.try_write()?;
+        let mut nodes = dir.try_write_owned()?;
 
         if nodes.is_empty() {
             nodes.create_file::<Node<S::Value>>(ROOT.to_string(), Node::Leaf(vec![]), 0)?;
@@ -127,7 +125,7 @@ where
 
     /// Load a [`BTreeLock`] with the given `schema` and `collator` from `dir`
     pub fn load(schema: S, collator: C, dir: DirLock<FE>) -> Result<Self, io::Error> {
-        let nodes = dir.try_read()?;
+        let nodes = dir.try_read_owned()?;
 
         if let Some(root) = nodes.get_file(&ROOT) {
             let _root = root.try_read()?;
@@ -148,7 +146,7 @@ where
     /// Lock this B+ tree for reading
     pub async fn read(&self) -> BTreeReadGuard<S, C, FE> {
         self.dir
-            .read()
+            .read_owned()
             .map(|dir| BTree {
                 schema: self.schema.clone(),
                 collator: self.collator.clone(),
@@ -160,7 +158,7 @@ where
     /// Lock this B+ tree for writing
     pub async fn write(&self) -> BTreeWriteGuard<S, C, FE> {
         self.dir
-            .write()
+            .write_owned()
             .map(|dir| BTree {
                 schema: self.schema.clone(),
                 collator: self.collator.clone(),
@@ -357,7 +355,7 @@ where
 {
     let file = dir.get_file(&node_id).expect("node").clone();
     let fut = file.into_read().map_ok(move |node| {
-        let keys: Pin<Box<dyn Stream<Item = Result<Key<V>, io::Error>>>> = match &*node {
+        let keys: IntoStream<V> = match &*node {
             Node::Leaf(keys) if *range == Range::default() => {
                 let keys = stream::iter(keys.to_vec().into_iter().map(Ok));
                 Box::pin(keys)
@@ -497,10 +495,10 @@ where
     Box::pin(stream::once(fut).try_flatten())
 }
 
-impl<S, C, FE> BTree<S, C, DirWriteGuard<FE>>
+impl<S, C, FE> BTree<S, C, DirWriteGuardOwned<FE>>
 where
     S: Schema,
-    C: Collate<Value = S::Value>,
+    C: Collate<Value = S::Value> + 'static,
     FE: FileLoad + AsType<Node<S::Value>>,
 {
     /// Delete the given `range` from this B+ tree.
@@ -511,7 +509,10 @@ where
     /// Insert the given `key` into this B+ tree.
     pub async fn insert(&mut self, key: Key<S::Value>) -> Result<bool, S::Error> {
         let key = self.schema.validate(key)?;
+        self.insert_inner(key).await
+    }
 
+    async fn insert_inner(&mut self, key: Key<S::Value>) -> Result<bool, S::Error> {
         let order = self.schema.order();
         let mut root = self.dir.write_file_owned(&ROOT).await?;
 
@@ -619,7 +620,7 @@ where
     /// Merge the keys in the `other` B+ tree range into this one.
     ///
     /// The source B+ tree **must** have an identical schema and collation.
-    pub async fn merge(&mut self, other: BTree<S, C, FE>) -> Result<(), S::Error> {
+    pub async fn merge(&mut self, other: BTreeReadGuard<S, C, FE>) -> Result<(), S::Error> {
         if self.collator != other.collator {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -639,7 +640,21 @@ where
             .into());
         }
 
-        todo!()
+        let mut keys = other.into_stream(Range::default());
+        while let Some(key) = keys.try_next().await? {
+            self.insert_inner(key).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Downgrade this [`BTreeWriteGuard`] into a [`BTreeReadGuard`].
+    pub fn downgrade(self) -> BTreeReadGuard<S, C, FE> {
+        BTreeReadGuard {
+            schema: self.schema,
+            collator: self.collator,
+            dir: self.dir.downgrade(),
+        }
     }
 }
 
