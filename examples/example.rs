@@ -13,7 +13,7 @@ use safecast::as_type;
 use tokio::fs;
 use tokio_util::io::StreamReader;
 
-use b_tree::{BTreeLock, Node, Range, Schema};
+use b_tree::{BTreeLock, BTreeReadGuard, Node, Range, Schema};
 
 const BLOCK_SIZE: usize = 4_096;
 
@@ -179,24 +179,30 @@ async fn main() -> Result<(), io::Error> {
     {
         let mut view = btree.write().await;
 
-        assert!(view.is_empty(Range::default()).await?);
+        assert!(view.is_empty(&Range::default()).await?);
+        assert_eq!(view.count(&Range::default()).await?, 0);
 
-        for i in 1..250 {
+        let n = 250;
+
+        for i in 1..n {
             let lo = i;
             let hi = i16::MAX - lo;
             let spread = hi - lo;
 
             let key = vec![lo, hi, spread];
-            assert!(!view.contains(key.clone()).await?);
-            assert!(view.is_empty(Range::with_prefix(vec![i])).await?);
-            assert!(view.insert(key.clone()).await?);
-            assert!(view.contains(key).await?);
-            assert!(!view.is_empty(Range::with_prefix(vec![i])).await?);
-            assert!(!view.is_empty(Range::default()).await?);
 
-            assert_eq!(view.count(Range::new(vec![], 0..i)).await?, (i as u64) - 1);
-            assert_eq!(view.count(Range::with_prefix(vec![i])).await?, 1);
-            assert_eq!(view.count(Range::default()).await?, i as u64);
+            assert!(!view.contains(key.clone()).await?);
+            assert!(view.is_empty(&Range::with_prefix(vec![i])).await?);
+
+            assert!(view.insert(key.clone()).await?);
+
+            assert!(view.contains(key).await?);
+            assert!(!view.is_empty(&Range::with_prefix(vec![i])).await?);
+            assert!(!view.is_empty(&Range::default()).await?);
+
+            assert_eq!(view.count(&Range::new(vec![], 0..i)).await?, (i as u64) - 1);
+            assert_eq!(view.count(&Range::with_prefix(vec![i])).await?, 1);
+            assert_eq!(view.count(&Range::default()).await?, i as u64);
         }
 
         let mut i = 1;
@@ -212,8 +218,39 @@ async fn main() -> Result<(), io::Error> {
             assert_eq!(key[0], i);
             i += 1;
         }
+
+        let view = btree.read().await;
+        assert_eq!(view.count(&Range::default()).await?, (n - 1) as u64);
+
+        for i in 1..n {
+            let count = (i as u64) - 1;
+            let range = Range::new(vec![], 0..i);
+
+            assert_eq!(
+                count_keys(&view, &range).await?,
+                count,
+                "bad key count at {}",
+                i
+            );
+
+            assert_eq!(view.count(&range).await?, count, "bad count at {}", i);
+        }
     }
 
     // clean up
     fs::remove_dir_all(path).await
+}
+
+async fn count_keys(
+    view: &BTreeReadGuard<ExampleSchema<i16>, Collator<i16>, File>,
+    range: &Range<i16>,
+) -> Result<u64, io::Error> {
+    let mut count = 0u64;
+
+    let mut leaves = view.to_stream(range);
+    while let Some(leaf) = leaves.try_next().await? {
+        count += leaf.len() as u64;
+    }
+
+    Ok(count)
 }

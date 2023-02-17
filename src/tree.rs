@@ -5,7 +5,9 @@ use std::string::ToString;
 use std::sync::Arc;
 use std::{fmt, io};
 
-use freqfs::{Dir, DirLock, DirReadGuard, DirWriteGuard, FileLoad, FileReadGuard};
+use freqfs::{
+    Dir, DirLock, DirReadGuard, DirWriteGuard, FileLoad, FileReadGuard, FileReadGuardOwned,
+};
 use futures::future::{self, Future, FutureExt};
 use futures::stream::{self, Stream, StreamExt, TryStreamExt};
 use futures::try_join;
@@ -30,6 +32,44 @@ const ROOT: Uuid = Uuid::from_fields(0, 0, 0, &[0u8; 8]);
 pub enum Node<V> {
     Index(Vec<Key<V>>, Vec<Uuid>),
     Leaf(Vec<Key<V>>),
+}
+
+impl<V> Node<V> {
+    fn is_leaf(&self) -> bool {
+        match self {
+            Self::Leaf(_) => true,
+            _ => false,
+        }
+    }
+}
+
+#[cfg(debug_assertions)]
+impl<V: fmt::Debug> fmt::Debug for Node<V> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::Leaf(keys) => write!(f, "leaf node with keys {:?}", keys),
+            Self::Index(bounds, children) => write!(
+                f,
+                "index node with bounds {:?} and children {:?}",
+                bounds, children
+            ),
+        }
+    }
+}
+
+#[cfg(not(debug_assertions))]
+impl<V: fmt::Debug> fmt::Debug for Node<V> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::Leaf(keys) => write!(f, "a leaf node with {} keys", keys.len()),
+            Self::Index(bounds, children) => write!(
+                f,
+                "an index node with {} bounds and {} children",
+                bounds.len(),
+                children.len()
+            ),
+        }
+    }
 }
 
 /// A lock to synchronize access to a persistent B+ tree
@@ -143,6 +183,7 @@ where
     C: Collate<Value = S::Value> + 'static,
     FE: FileLoad + AsType<Node<S::Value>>,
     G: Deref<Target = Dir<FE>> + 'static,
+    Node<S::Value>: fmt::Debug,
 {
     /// Return `true` if this B+ tree contains the given `key`.
     pub async fn contains(&self, key: Key<S::Value>) -> Result<bool, S::Error> {
@@ -172,25 +213,25 @@ where
     }
 
     /// Count how many keys lie within the given `range` of this B+ tree.
-    pub async fn count(&self, range: Range<S::Value>) -> Result<u64, S::Error> {
+    pub async fn count(&self, range: &Range<S::Value>) -> Result<u64, S::Error> {
         let root = self.dir.read_file(&ROOT).await?;
-        count(&self.dir, &*self.collator, &range, root)
+        count(&self.dir, &*self.collator, range, root)
             .map_err(S::Error::from)
             .await
     }
 
     /// Return `true` if the given `range` of this B+ tree contains no keys.
-    pub async fn is_empty(&self, range: Range<S::Value>) -> Result<bool, S::Error> {
+    pub async fn is_empty(&self, range: &Range<S::Value>) -> Result<bool, S::Error> {
         let mut node = self.dir.read_file(&ROOT).await?;
 
         Ok(loop {
             match &*node {
                 Node::Leaf(keys) => {
-                    let (l, r) = self.collator.bisect(&keys, &range);
+                    let (l, r) = self.collator.bisect(&keys, range);
                     break l == r;
                 }
                 Node::Index(bounds, children) => {
-                    let (l, r) = self.collator.bisect(&bounds, &range);
+                    let (l, r) = self.collator.bisect(&bounds, range);
 
                     if l == children.len() {
                         node = self.dir.read_file(&children[l - 1]).await?;
@@ -204,7 +245,22 @@ where
         })
     }
 
-    /// Read all the keys in the given `range` of this B+ tree.
+    /// Borrow all the keys in the given `range` of this B+ tree.
+    pub fn to_stream<'a>(
+        &'a self,
+        range: &'a Range<S::Value>,
+    ) -> impl Stream<Item = Result<FileReadGuardOwned<FE, [Key<S::Value>]>, io::Error>> + Sized + 'a
+    {
+        let range = if range == &Range::default() {
+            None
+        } else {
+            Some(range)
+        };
+
+        to_stream(&self.dir, &*self.collator, range, ROOT)
+    }
+
+    /// Copy all the keys in the given `range` of this B+ tree.
     pub fn into_stream(
         self,
         range: Range<S::Value>,
@@ -226,7 +282,9 @@ where
 {
     Box::pin(async move {
         match &*node {
-            Node::Leaf(keys) if range == &Range::default() => Ok(keys.len() as u64),
+            Node::Leaf(keys) if range == &Range::default() => {
+                Ok(keys.len() as u64)
+            }
             Node::Leaf(keys) => {
                 let (l, r) = collator.bisect(&keys, &range);
 
@@ -243,42 +301,38 @@ where
                     Ok((r - l) as u64)
                 }
             }
+            Node::Index(_bounds, children) if range == &Range::default() => {
+                stream::iter(children)
+                    .then(|node_id| dir.read_file(node_id))
+                    .map_ok(|node| count(dir, collator, range, node))
+                    .try_buffer_unordered(num_cpus::get())
+                    .try_fold(0, |sum, count| future::ready(Ok(sum + count)))
+                    .await
+            }
             Node::Index(bounds, children) => {
                 let (l, r) = collator.bisect(&bounds, &range);
 
                 if l == children.len() {
                     let node = dir.read_file(children.last().expect("last")).await?;
                     count(dir, collator, range, node).await
-                } else if l == r || (r == children.len() && l + 1 == r) {
+                } else if l == r || l + 1 == r {
                     let node = dir.read_file(&children[l]).await?;
                     count(dir, collator, range, node).await
-                } else if l + 1 == r {
-                    let (left, right) =
-                        try_join!(dir.read_file(&children[l]), dir.read_file(&children[r]))?;
-
-                    let (l_count, r_count) = try_join!(
-                        count(dir, collator, range, left),
-                        count(dir, collator, range, right)
-                    )?;
-
-                    Ok(l_count + r_count)
                 } else {
-                    let r = if r == children.len() { r - 1 } else { r };
-
                     let left = dir
                         .read_file(&children[l])
                         .and_then(|node| count(dir, collator, range, node));
 
                     let default_range = Range::default();
 
-                    let middle = stream::iter(&children[(l + 1)..r])
+                    let middle = stream::iter(&children[(l + 1)..(r - 1)])
                         .then(|node_id| dir.read_file(node_id))
                         .map_ok(|node| count(dir, collator, &default_range, node))
                         .try_buffer_unordered(num_cpus::get())
                         .try_fold(0, |sum, count| future::ready(Ok(sum + count)));
 
                     let right = dir
-                        .read_file(&children[r])
+                        .read_file(&children[r - 1])
                         .and_then(|node| count(dir, collator, range, node));
 
                     let (left, middle, right) = try_join!(left, middle, right)?;
@@ -289,12 +343,14 @@ where
     })
 }
 
+type IntoStream<V> = Pin<Box<dyn Stream<Item = Result<Key<V>, io::Error>>>>;
+
 fn into_stream<C, V, FE, G>(
     dir: Arc<G>,
     collator: Arc<C>,
     range: Arc<Range<V>>,
     node_id: Uuid,
-) -> impl Stream<Item = Result<Key<V>, io::Error>> + Sized
+) -> IntoStream<V>
 where
     C: Collate<Value = V> + 'static,
     V: Clone + PartialEq + 'static,
@@ -324,20 +380,22 @@ where
                     Box::pin(stream::iter(keys[l..r].to_vec().into_iter().map(Ok)))
                 }
             }
+            Node::Index(_bounds, children) if *range == Range::default() => {
+                let keys = stream::iter(children.to_vec())
+                    .map(move |node_id| {
+                        into_stream(dir.clone(), collator.clone(), range.clone(), node_id)
+                    })
+                    .flatten();
+
+                Box::pin(keys)
+            }
             Node::Index(bounds, children) => {
                 let (l, r) = collator.bisect(&bounds, &range);
 
                 if l == children.len() {
                     into_stream(dir, collator, range, children[l - 1])
-                } else if l == r || (r == children.len() && l + 1 == r) {
+                } else if l == r || l + 1 == r {
                     into_stream(dir, collator, range, children[l])
-                } else if l + 1 == r {
-                    let left =
-                        into_stream(dir.clone(), collator.clone(), range.clone(), children[l]);
-
-                    let right = into_stream(dir, collator, range, children[r]);
-
-                    Box::pin(left.chain(right))
                 } else {
                     let r = if r == children.len() { r - 1 } else { r };
 
@@ -361,6 +419,77 @@ where
 
                     Box::pin(left.chain(middle).chain(right))
                 }
+            }
+        };
+
+        keys
+    });
+
+    Box::pin(stream::once(fut).try_flatten())
+}
+
+type ToStream<'a, FE, V> =
+    Pin<Box<dyn Stream<Item = Result<FileReadGuardOwned<FE, [Key<V>]>, io::Error>> + 'a>>;
+
+fn to_stream<'a, C, V, FE, G>(
+    dir: &'a G,
+    collator: &'a C,
+    range: Option<&'a Range<V>>,
+    node_id: Uuid,
+) -> ToStream<'a, FE, V>
+where
+    C: Collate<Value = V> + 'a,
+    V: Clone + PartialEq + 'a,
+    FE: FileLoad + AsType<Node<V>>,
+    G: Deref<Target = Dir<FE>> + 'a,
+    Node<V>: fmt::Debug,
+{
+    let file = dir.get_file(&node_id).expect("node").clone();
+    let fut = file.into_read().map_ok(move |node| {
+        let keys: ToStream<FE, V> = {
+            if node.is_leaf() {
+                let guard = FileReadGuardOwned::try_map(node, |node| match node {
+                    Node::Leaf(keys) => match range {
+                        None => Some(&keys[..]),
+                        Some(range) => {
+                            let (l, r) = collator.bisect(&keys, &range);
+
+                            let slice = if l == r && l < keys.len() {
+                                let cmp = collator.compare_range(&keys[l], &*range);
+                                if cmp == Ordering::Equal {
+                                    &keys[l..l + 1]
+                                } else {
+                                    &keys[l..l]
+                                }
+                            } else {
+                                &keys[l..r]
+                            };
+
+                            Some(slice)
+                        }
+                    },
+                    Node::Index(_, _) => None,
+                })
+                .expect("leaf");
+
+                Box::pin(stream::once(future::ready(Ok(guard))))
+            } else {
+                let children = match &*node {
+                    Node::Index(bounds, children) => match range {
+                        Some(range) => {
+                            let (l, r) = collator.bisect(&bounds, &range);
+                            children[l..r].to_vec()
+                        }
+                        None => children.to_vec(),
+                    },
+                    _ => unreachable!("leaf case handled above"),
+                };
+
+                let keys = children
+                    .into_iter()
+                    .map(move |node_id| to_stream(dir, collator, range, node_id));
+
+                Box::pin(stream::iter(keys).flatten())
             }
         };
 
