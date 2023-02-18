@@ -655,9 +655,12 @@ where
         key: Key<S::Value>,
     ) -> Pin<Box<dyn Future<Output = Result<Insert<S::Value>, io::Error>> + 'a>> {
         Box::pin(async move {
+            let order = self.schema.order();
+
             match node {
                 Node::Leaf(keys) => {
-                    debug_assert!(keys.len() <= self.schema.order());
+                    debug_assert!(keys.len() >= (order / 2) - 1);
+                    debug_assert!(keys.len() < order);
                     debug_assert!(self.collator.is_sorted(keys));
 
                     let i = self.collator.bisect_left(&keys, &key);
@@ -671,8 +674,9 @@ where
 
                     debug_assert!(self.collator.is_sorted(&keys));
 
-                    if keys.len() > self.schema.order() {
-                        let mid = div_ceil(self.schema.order(), 2);
+                    let mid = order / 2;
+
+                    if keys.len() >= order {
                         let size = self.schema.block_size() / 2;
                         let new_leaf: Vec<_> = keys.drain(mid..).collect();
 
@@ -680,8 +684,8 @@ where
                         debug_assert!(keys.len() >= mid);
 
                         let middle_key = new_leaf[0].clone();
-                        let (new_node_id, _) =
-                            self.dir.create_file_unique(Node::Leaf(new_leaf), size)?;
+                        let node = Node::Leaf(new_leaf);
+                        let (new_node_id, _) = self.dir.create_file_unique(node, size)?;
 
                         if i == 0 {
                             Ok(Insert::OverflowLeft(
@@ -693,7 +697,7 @@ where
                             Ok(Insert::Overflow(middle_key, new_node_id))
                         }
                     } else {
-                        debug_assert!(keys.len() > div_ceil(self.schema.order(), 2));
+                        debug_assert!(keys.len() > mid);
 
                         if i == 0 {
                             Ok(Insert::Left(keys[0].clone()))
@@ -703,12 +707,11 @@ where
                     }
                 }
                 Node::Index(bounds, children) => {
-                    let order = self.schema.order();
                     let size = self.schema.block_size() >> 1;
 
                     debug_assert_eq!(bounds.len(), children.len());
                     debug_assert!(self.collator.is_sorted(bounds));
-                    debug_assert!(children.len() > div_ceil(order, 2) - 1);
+                    debug_assert!(children.len() >= self.schema.order() / 2);
                     debug_assert!(children.len() <= order);
 
                     let i = match self.collator.bisect_left(&bounds, &key) {
@@ -718,7 +721,7 @@ where
 
                     let mut child = self.dir.write_file_owned(&children[i]).await?;
 
-                    match self.insert_inner(&mut child, key).await? {
+                    let overflow_left = match self.insert_inner(&mut child, key).await? {
                         Insert::None => return Ok(Insert::None),
                         Insert::Right => return Ok(Insert::Right),
                         Insert::Left(key) => {
@@ -734,18 +737,19 @@ where
                             bounds[i] = left;
                             bounds.insert(i + 1, middle);
                             children.insert(i + 1, child_id);
+                            i == 0
                         }
                         Insert::Overflow(bound, child_id) => {
                             bounds.insert(i + 1, bound);
                             children.insert(i + 1, child_id);
+                            false
                         }
-                    }
+                    };
 
                     debug_assert!(self.collator.is_sorted(bounds));
 
                     if children.len() > order {
-                        let mid = div_ceil(order, 2);
-
+                        let mid = div_ceil(self.schema.order(), 2);
                         let new_bounds: Vec<_> = bounds.drain(mid..).collect();
                         let new_children: Vec<_> = children.drain(mid..).collect();
 
@@ -753,7 +757,7 @@ where
                         let node = Node::Index(new_bounds, new_children);
                         let (node_id, _) = self.dir.create_file_unique(node, size)?;
 
-                        if i == 0 {
+                        if overflow_left {
                             Ok(Insert::OverflowLeft(
                                 bounds[0].to_vec(),
                                 left_bound,
