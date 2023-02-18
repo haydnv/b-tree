@@ -168,6 +168,11 @@ where
     }
 }
 
+type IntoStream<V> = Pin<Box<dyn Stream<Item = Result<Key<V>, io::Error>>>>;
+
+type ToStream<'a, FE, V> =
+    Pin<Box<dyn Stream<Item = Result<FileReadGuardOwned<FE, [Key<V>]>, io::Error>> + 'a>>;
+
 /// A B+ tree
 pub struct BTree<S, C, D> {
     schema: Arc<S>,
@@ -184,38 +189,134 @@ where
     Node<S::Value>: fmt::Debug,
 {
     /// Return `true` if this B+ tree contains the given `key`.
-    pub async fn contains(&self, key: Key<S::Value>) -> Result<bool, S::Error> {
-        let key = self.schema.validate(key)?;
+    pub async fn contains(&self, key: &Key<S::Value>) -> Result<bool, io::Error> {
         let mut node = self.dir.read_file(&ROOT).await?;
 
         loop {
             match &*node {
                 Node::Leaf(keys) => {
-                    let i = self.collator.bisect_left(&keys, &key);
-
-                    break Ok(match keys.get(i) {
-                        Some(present) => present == &key,
-                        _ => false,
+                    let i = self.collator.bisect_left(&keys, key);
+                    break Ok(if i < keys.len() {
+                        match keys.get(i) {
+                            Some(present) => present == key,
+                            _ => false,
+                        }
+                    } else {
+                        false
                     });
                 }
                 Node::Index(bounds, children) => {
-                    let i = match self.collator.bisect_left(&bounds, &key) {
-                        i if i == children.len() => i - 1,
-                        i => i,
-                    };
-
-                    node = self.dir.read_file(&children[i]).await?;
+                    let i = self.collator.bisect_right(&bounds, key);
+                    if i == 0 {
+                        return Ok(false);
+                    } else {
+                        node = self.dir.read_file(&children[i - 1]).await?;
+                    }
                 }
             }
         }
     }
 
     /// Count how many keys lie within the given `range` of this B+ tree.
-    pub async fn count(&self, range: &Range<S::Value>) -> Result<u64, S::Error> {
+    pub async fn count(&self, range: &Range<S::Value>) -> Result<u64, io::Error> {
         let root = self.dir.read_file(&ROOT).await?;
-        count(&self.dir, &*self.collator, range, root)
-            .map_err(S::Error::from)
-            .await
+        self.count_inner(range, root).await
+    }
+
+    fn count_inner<'a>(
+        &'a self,
+        range: &'a Range<S::Value>,
+        node: FileReadGuard<'a, Node<S::Value>>,
+    ) -> Pin<Box<dyn Future<Output = Result<u64, io::Error>> + 'a>> {
+        Box::pin(async move {
+            match &*node {
+                Node::Leaf(keys) if range == &Range::default() => Ok(keys.len() as u64),
+                Node::Leaf(keys) => {
+                    let (l, r) = self.collator.bisect(&keys, range);
+
+                    if l == keys.len() {
+                        Ok(0)
+                    } else if l == r {
+                        let cmp = self.collator.compare_range(&keys[l], range);
+                        if cmp == Ordering::Equal {
+                            Ok(1)
+                        } else {
+                            Ok(0)
+                        }
+                    } else {
+                        Ok((r - l) as u64)
+                    }
+                }
+                Node::Index(_bounds, children) if range == &Range::default() => {
+                    stream::iter(children)
+                        .then(|node_id| self.dir.read_file(node_id))
+                        .map_ok(|node| self.count_inner(range, node))
+                        .try_buffer_unordered(num_cpus::get())
+                        .try_fold(0, |sum, count| future::ready(Ok(sum + count)))
+                        .await
+                }
+                Node::Index(bounds, children) => {
+                    let (l, r) = self.collator.bisect(&bounds, range);
+
+                    if l == children.len() {
+                        let node = self.dir.read_file(children.last().expect("last")).await?;
+                        self.count_inner(range, node).await
+                    } else if l == r || l + 1 == r {
+                        let node = self.dir.read_file(&children[l]).await?;
+                        self.count_inner(range, node).await
+                    } else {
+                        let left = self
+                            .dir
+                            .read_file(&children[l])
+                            .and_then(|node| self.count_inner(range, node));
+
+                        let default_range = Range::default();
+
+                        let middle = stream::iter(&children[(l + 1)..(r - 1)])
+                            .then(|node_id| self.dir.read_file(node_id))
+                            .map_ok(|node| self.count_inner(&default_range, node))
+                            .try_buffer_unordered(num_cpus::get())
+                            .try_fold(0, |sum, count| future::ready(Ok(sum + count)));
+
+                        let right = self
+                            .dir
+                            .read_file(&children[r - 1])
+                            .and_then(|node| self.count_inner(range, node));
+
+                        let (left, middle, right) = try_join!(left, middle, right)?;
+                        Ok(left + middle + right)
+                    }
+                }
+            }
+        })
+    }
+
+    /// Return the first key in this B+Tree, if any.
+    pub async fn first(&self) -> Result<Option<Key<S::Value>>, io::Error> {
+        let mut node = self.dir.read_file(&ROOT).await?;
+
+        loop {
+            match &*node {
+                Node::Leaf(keys) => return Ok(keys.first().cloned()),
+                Node::Index(_bounds, children) => {
+                    node = self.dir.read_file(&children[0]).await?;
+                }
+            }
+        }
+    }
+
+    /// Return the last key in this B+Tree, if any.
+    pub async fn last(&self) -> Result<Option<Key<S::Value>>, io::Error> {
+        let mut node = self.dir.read_file(&ROOT).await?;
+
+        loop {
+            match &*node {
+                Node::Leaf(keys) => return Ok(keys.last().cloned()),
+                Node::Index(_bounds, children) => {
+                    node = self.dir.read_file(children.last().expect("last")).await?;
+                }
+            }
+        }
     }
 
     /// Return `true` if the given `range` of this B+ tree contains no keys.
@@ -255,7 +356,63 @@ where
             Some(range)
         };
 
-        to_stream(&self.dir, &*self.collator, range, ROOT)
+        self.to_stream_inner(range, ROOT)
+    }
+
+    fn to_stream_inner<'a>(&'a self, range: Option<&'a Range<S::Value>>, node_id: Uuid) -> ToStream<'a, FE, S::Value> {
+        let file = self.dir.get_file(&node_id).expect("node").clone();
+        let fut = file.into_read().map_ok(move |node| {
+            let keys: ToStream<FE, S::Value> = {
+                if node.is_leaf() {
+                    let guard = FileReadGuardOwned::try_map(node, |node| match node {
+                        Node::Leaf(keys) => match range {
+                            None => Some(&keys[..]),
+                            Some(range) => {
+                                let (l, r) = self.collator.bisect(&keys, &range);
+
+                                let slice = if l == r && l < keys.len() {
+                                    let cmp = self.collator.compare_range(&keys[l], &*range);
+                                    if cmp == Ordering::Equal {
+                                        &keys[l..l + 1]
+                                    } else {
+                                        &keys[l..l]
+                                    }
+                                } else {
+                                    &keys[l..r]
+                                };
+
+                                Some(slice)
+                            }
+                        },
+                        Node::Index(_, _) => None,
+                    })
+                        .expect("leaf");
+
+                    Box::pin(stream::once(future::ready(Ok(guard))))
+                } else {
+                    let children = match &*node {
+                        Node::Index(bounds, children) => match range {
+                            Some(range) => {
+                                let (l, r) = self.collator.bisect(&bounds, &range);
+                                children[l..r].to_vec()
+                            }
+                            None => children.to_vec(),
+                        },
+                        _ => unreachable!("leaf case handled above"),
+                    };
+
+                    let keys = children
+                        .into_iter()
+                        .map(move |node_id| self.to_stream_inner(range, node_id));
+
+                    Box::pin(stream::iter(keys).flatten())
+                }
+            };
+
+            keys
+        });
+
+        Box::pin(stream::once(fut).try_flatten())
     }
 
     /// Copy all the keys in the given `range` of this B+ tree.
@@ -265,81 +422,27 @@ where
     ) -> impl Stream<Item = Result<Key<S::Value>, io::Error>> + Sized {
         into_stream(Arc::new(self.dir), self.collator, Arc::new(range), ROOT)
     }
-}
 
-fn count<'a, C, V, FE>(
-    dir: &'a Dir<FE>,
-    collator: &'a C,
-    range: &'a Range<V>,
-    node: FileReadGuard<'a, Node<V>>,
-) -> Pin<Box<dyn Future<Output = Result<u64, io::Error>> + 'a>>
-where
-    C: Collate<Value = V>,
-    V: PartialEq + fmt::Debug + 'a,
-    FE: FileLoad + AsType<Node<V>>,
-{
-    Box::pin(async move {
-        match &*node {
-            Node::Leaf(keys) if range == &Range::default() => Ok(keys.len() as u64),
-            Node::Leaf(keys) => {
-                let (l, r) = collator.bisect(&keys, &range);
-
-                if l == keys.len() {
-                    Ok(0)
-                } else if l == r {
-                    let cmp = collator.compare_range(&keys[l], range);
-                    if cmp == Ordering::Equal {
-                        Ok(1)
-                    } else {
-                        Ok(0)
-                    }
-                } else {
-                    Ok((r - l) as u64)
-                }
-            }
-            Node::Index(_bounds, children) if range == &Range::default() => {
-                stream::iter(children)
-                    .then(|node_id| dir.read_file(node_id))
-                    .map_ok(|node| count(dir, collator, range, node))
-                    .try_buffer_unordered(num_cpus::get())
-                    .try_fold(0, |sum, count| future::ready(Ok(sum + count)))
-                    .await
-            }
-            Node::Index(bounds, children) => {
-                let (l, r) = collator.bisect(&bounds, &range);
-
-                if l == children.len() {
-                    let node = dir.read_file(children.last().expect("last")).await?;
-                    count(dir, collator, range, node).await
-                } else if l == r || l + 1 == r {
-                    let node = dir.read_file(&children[l]).await?;
-                    count(dir, collator, range, node).await
-                } else {
-                    let left = dir
-                        .read_file(&children[l])
-                        .and_then(|node| count(dir, collator, range, node));
-
-                    let default_range = Range::default();
-
-                    let middle = stream::iter(&children[(l + 1)..(r - 1)])
-                        .then(|node_id| dir.read_file(node_id))
-                        .map_ok(|node| count(dir, collator, &default_range, node))
-                        .try_buffer_unordered(num_cpus::get())
-                        .try_fold(0, |sum, count| future::ready(Ok(sum + count)));
-
-                    let right = dir
-                        .read_file(&children[r - 1])
-                        .and_then(|node| count(dir, collator, range, node));
-
-                    let (left, middle, right) = try_join!(left, middle, right)?;
-                    Ok(left + middle + right)
-                }
-            }
+    #[cfg(debug_assertions)]
+    pub async fn is_valid(&self) -> Result<bool, io::Error> {
+        let range = Range::default();
+        let count = self.count(&range).await? as usize;
+        let mut contents = Vec::with_capacity(count);
+        let mut stream = self.to_stream(&range);
+        while let Some(leaf) = stream.try_next().await? {
+            contents.extend_from_slice(&*leaf);
         }
-    })
-}
 
-type IntoStream<V> = Pin<Box<dyn Stream<Item = Result<Key<V>, io::Error>>>>;
+        assert_eq!(count, contents.len());
+        assert!(
+            self.collator.is_sorted(&contents),
+            "not sorted: {:?}",
+            contents
+        );
+
+        Ok(true)
+    }
+}
 
 fn into_stream<C, V, FE, G>(
     dir: Arc<G>,
@@ -424,75 +527,12 @@ where
     Box::pin(stream::once(fut).try_flatten())
 }
 
-type ToStream<'a, FE, V> =
-    Pin<Box<dyn Stream<Item = Result<FileReadGuardOwned<FE, [Key<V>]>, io::Error>> + 'a>>;
-
-fn to_stream<'a, C, V, FE, G>(
-    dir: &'a G,
-    collator: &'a C,
-    range: Option<&'a Range<V>>,
-    node_id: Uuid,
-) -> ToStream<'a, FE, V>
-where
-    C: Collate<Value = V> + 'a,
-    V: Clone + PartialEq + 'a,
-    FE: FileLoad + AsType<Node<V>>,
-    G: Deref<Target = Dir<FE>> + 'a,
-    Node<V>: fmt::Debug,
-{
-    let file = dir.get_file(&node_id).expect("node").clone();
-    let fut = file.into_read().map_ok(move |node| {
-        let keys: ToStream<FE, V> = {
-            if node.is_leaf() {
-                let guard = FileReadGuardOwned::try_map(node, |node| match node {
-                    Node::Leaf(keys) => match range {
-                        None => Some(&keys[..]),
-                        Some(range) => {
-                            let (l, r) = collator.bisect(&keys, &range);
-
-                            let slice = if l == r && l < keys.len() {
-                                let cmp = collator.compare_range(&keys[l], &*range);
-                                if cmp == Ordering::Equal {
-                                    &keys[l..l + 1]
-                                } else {
-                                    &keys[l..l]
-                                }
-                            } else {
-                                &keys[l..r]
-                            };
-
-                            Some(slice)
-                        }
-                    },
-                    Node::Index(_, _) => None,
-                })
-                .expect("leaf");
-
-                Box::pin(stream::once(future::ready(Ok(guard))))
-            } else {
-                let children = match &*node {
-                    Node::Index(bounds, children) => match range {
-                        Some(range) => {
-                            let (l, r) = collator.bisect(&bounds, &range);
-                            children[l..r].to_vec()
-                        }
-                        None => children.to_vec(),
-                    },
-                    _ => unreachable!("leaf case handled above"),
-                };
-
-                let keys = children
-                    .into_iter()
-                    .map(move |node_id| to_stream(dir, collator, range, node_id));
-
-                Box::pin(stream::iter(keys).flatten())
-            }
-        };
-
-        keys
-    });
-
-    Box::pin(stream::once(fut).try_flatten())
+enum Insert<V> {
+    None,
+    Left(Key<V>),
+    Right,
+    OverflowLeft(Key<V>, Key<V>, Uuid),
+    Overflow(Key<V>, Uuid),
 }
 
 impl<S, C, FE> BTree<S, C, DirWriteGuardOwned<FE>>
@@ -501,18 +541,13 @@ where
     C: Collate<Value = S::Value> + 'static,
     FE: FileLoad + AsType<Node<S::Value>>,
 {
-    /// Delete the given `range` from this B+ tree.
-    pub async fn delete(&mut self, _range: Key<S::Value>) -> Result<bool, S::Error> {
-        todo!()
-    }
-
     /// Insert the given `key` into this B+ tree.
     pub async fn insert(&mut self, key: Key<S::Value>) -> Result<bool, S::Error> {
         let key = self.schema.validate(key)?;
-        self.insert_inner(key).await
+        self.insert_root(key).await
     }
 
-    async fn insert_inner(&mut self, key: Key<S::Value>) -> Result<bool, S::Error> {
+    async fn insert_root(&mut self, key: Key<S::Value>) -> Result<bool, S::Error> {
         let order = self.schema.order();
         let mut root = self.dir.write_file_owned(&ROOT).await?;
 
@@ -530,15 +565,20 @@ where
                 debug_assert!(self.collator.is_sorted(&keys));
 
                 if keys.len() > order {
+                    let mid = div_ceil(order, 2);
                     let size = self.schema.block_size() / 2;
-                    let right: Vec<_> = keys.drain(div_ceil(order, 2)..).collect();
-                    let left: Vec<_> = keys.drain(..).collect();
 
-                    let left_key = left[0].clone();
-                    let (left, _) = self.dir.create_file_unique(Node::Leaf(left), size)?;
+                    let right: Vec<_> = keys.drain(mid..).collect();
+                    debug_assert!(right.len() >= mid);
 
                     let right_key = right[0].clone();
                     let (right, _) = self.dir.create_file_unique(Node::Leaf(right), size)?;
+
+                    let left: Vec<_> = keys.drain(..).collect();
+                    debug_assert!(left.len() >= mid);
+
+                    let left_key = left[0].clone();
+                    let (left, _) = self.dir.create_file_unique(Node::Leaf(left), size)?;
 
                     Some(Node::Index(vec![left_key, right_key], vec![left, right]))
                 } else {
@@ -554,15 +594,7 @@ where
                 };
 
                 let mut child = self.dir.write_file_owned(&children[i]).await?;
-
-                let result = insert(
-                    &mut self.dir,
-                    &*self.schema,
-                    &*self.collator,
-                    &mut child,
-                    key,
-                )
-                .await?;
+                let result = self.insert_inner(&mut child, key).await?;
 
                 match result {
                     Insert::None => return Ok(false),
@@ -570,7 +602,7 @@ where
                     Insert::Left(key) => {
                         bounds[i] = key;
                     }
-                    Insert::LeftOverflow(left, middle, child_id) => {
+                    Insert::OverflowLeft(left, middle, child_id) => {
                         bounds[i] = left;
                         bounds.insert(i + 1, middle);
                         children.insert(i + 1, child_id);
@@ -584,7 +616,7 @@ where
                 debug_assert!(self.collator.is_sorted(&bounds));
                 debug_assert_eq!(bounds.len(), children.len());
 
-                if bounds.len() > order {
+                if children.len() > order {
                     let size = self.schema.block_size() / 2;
                     let right_bounds: Vec<_> = bounds.drain(div_ceil(order, 2)..).collect();
                     let right_children: Vec<_> = children.drain(div_ceil(order, 2)..).collect();
@@ -617,6 +649,129 @@ where
         Ok(true)
     }
 
+    fn insert_inner<'a>(
+        &'a mut self,
+        node: &'a mut Node<S::Value>,
+        key: Key<S::Value>,
+    ) -> Pin<Box<dyn Future<Output = Result<Insert<S::Value>, io::Error>> + 'a>> {
+        Box::pin(async move {
+            match node {
+                Node::Leaf(keys) => {
+                    debug_assert!(keys.len() <= self.schema.order());
+                    debug_assert!(self.collator.is_sorted(keys));
+
+                    let i = self.collator.bisect_left(&keys, &key);
+
+                    if i < keys.len() && keys[i] == key {
+                        // no-op
+                        return Ok(Insert::None);
+                    }
+
+                    keys.insert(i, key);
+
+                    debug_assert!(self.collator.is_sorted(&keys));
+
+                    if keys.len() > self.schema.order() {
+                        let mid = div_ceil(self.schema.order(), 2);
+                        let size = self.schema.block_size() / 2;
+                        let new_leaf: Vec<_> = keys.drain(mid..).collect();
+
+                        debug_assert!(new_leaf.len() >= mid);
+                        debug_assert!(keys.len() >= mid);
+
+                        let middle_key = new_leaf[0].clone();
+                        let (new_node_id, _) =
+                            self.dir.create_file_unique(Node::Leaf(new_leaf), size)?;
+
+                        if i == 0 {
+                            Ok(Insert::OverflowLeft(
+                                keys[0].clone(),
+                                middle_key,
+                                new_node_id,
+                            ))
+                        } else {
+                            Ok(Insert::Overflow(middle_key, new_node_id))
+                        }
+                    } else {
+                        debug_assert!(keys.len() > div_ceil(self.schema.order(), 2));
+
+                        if i == 0 {
+                            Ok(Insert::Left(keys[0].clone()))
+                        } else {
+                            Ok(Insert::Right)
+                        }
+                    }
+                }
+                Node::Index(bounds, children) => {
+                    let order = self.schema.order();
+                    let size = self.schema.block_size() >> 1;
+
+                    debug_assert_eq!(bounds.len(), children.len());
+                    debug_assert!(self.collator.is_sorted(bounds));
+                    debug_assert!(children.len() > div_ceil(order, 2) - 1);
+                    debug_assert!(children.len() <= order);
+
+                    let i = match self.collator.bisect_left(&bounds, &key) {
+                        0 => 0,
+                        i => i - 1,
+                    };
+
+                    let mut child = self.dir.write_file_owned(&children[i]).await?;
+
+                    match self.insert_inner(&mut child, key).await? {
+                        Insert::None => return Ok(Insert::None),
+                        Insert::Right => return Ok(Insert::Right),
+                        Insert::Left(key) => {
+                            bounds[i] = key;
+
+                            return if i == 0 {
+                                Ok(Insert::Left(bounds[i].clone()))
+                            } else {
+                                Ok(Insert::Right)
+                            };
+                        }
+                        Insert::OverflowLeft(left, middle, child_id) => {
+                            bounds[i] = left;
+                            bounds.insert(i + 1, middle);
+                            children.insert(i + 1, child_id);
+                        }
+                        Insert::Overflow(bound, child_id) => {
+                            bounds.insert(i + 1, bound);
+                            children.insert(i + 1, child_id);
+                        }
+                    }
+
+                    debug_assert!(self.collator.is_sorted(bounds));
+
+                    if children.len() > order {
+                        let mid = div_ceil(order, 2);
+
+                        let new_bounds: Vec<_> = bounds.drain(mid..).collect();
+                        let new_children: Vec<_> = children.drain(mid..).collect();
+
+                        let left_bound = new_bounds[0].clone();
+                        let node = Node::Index(new_bounds, new_children);
+                        let (node_id, _) = self.dir.create_file_unique(node, size)?;
+
+                        if i == 0 {
+                            Ok(Insert::OverflowLeft(
+                                bounds[0].to_vec(),
+                                left_bound,
+                                node_id,
+                            ))
+                        } else {
+                            Ok(Insert::Overflow(left_bound, node_id))
+                        }
+                    } else if i == 0 {
+                        Ok(Insert::Left(bounds[0].clone()))
+                    } else {
+                        Ok(Insert::Right)
+                    }
+                }
+            }
+        })
+    }
+
     /// Merge the keys in the `other` B+ tree range into this one.
     ///
     /// The source B+ tree **must** have an identical schema and collation.
@@ -642,7 +797,7 @@ where
 
         let mut keys = other.into_stream(Range::default());
         while let Some(key) = keys.try_next().await? {
-            self.insert_inner(key).await?;
+            self.insert_root(key).await?;
         }
 
         Ok(())
@@ -656,148 +811,6 @@ where
             dir: self.dir.downgrade(),
         }
     }
-}
-
-enum Insert<V> {
-    None,
-    Left(Key<V>),
-    Right,
-    LeftOverflow(Key<V>, Key<V>, Uuid),
-    Overflow(Key<V>, Uuid),
-}
-
-fn insert<'a, FE, S, C, V>(
-    dir: &'a mut Dir<FE>,
-    schema: &'a S,
-    collator: &'a C,
-    node: &'a mut Node<V>,
-    key: Key<V>,
-) -> Pin<Box<dyn Future<Output = Result<Insert<V>, io::Error>> + 'a>>
-where
-    FE: FileLoad + AsType<Node<V>>,
-    S: Schema<Value = V>,
-    C: Collate<Value = V>,
-    V: Clone + PartialEq + 'a,
-{
-    Box::pin(async move {
-        match node {
-            Node::Leaf(keys) => {
-                let i = collator.bisect_left(&keys, &key);
-
-                if i < keys.len() && keys[i] == key {
-                    // no-op
-                    return Ok(Insert::None);
-                }
-
-                keys.insert(i, key);
-
-                debug_assert!(collator.is_sorted(&keys));
-
-                if keys.len() > schema.order() {
-                    let size = schema.block_size() / 2;
-                    let new_leaf: Vec<_> = keys.drain(div_ceil(schema.order(), 2)..).collect();
-
-                    let middle_key = new_leaf[0].clone();
-                    let (new_node_id, _) = dir.create_file_unique(Node::Leaf(new_leaf), size)?;
-
-                    if i == 0 {
-                        Ok(Insert::LeftOverflow(
-                            keys[0].clone(),
-                            middle_key,
-                            new_node_id,
-                        ))
-                    } else {
-                        Ok(Insert::Overflow(middle_key, new_node_id))
-                    }
-                } else {
-                    debug_assert!(keys.len() > div_ceil(schema.order(), 2));
-
-                    if i == 0 {
-                        Ok(Insert::Left(keys[0].clone()))
-                    } else {
-                        Ok(Insert::Right)
-                    }
-                }
-            }
-            Node::Index(bounds, children) => {
-                debug_assert_eq!(bounds.len(), children.len());
-                debug_assert!(children.len() > div_ceil(schema.order(), 2) - 1);
-                debug_assert!(children.len() <= schema.order());
-
-                let i = match collator.bisect_left(&bounds, &key) {
-                    0 => 0,
-                    i => i - 1,
-                };
-
-                let mut child = dir.write_file_owned(&children[i]).await?;
-
-                let result = insert(dir, schema, collator, &mut child, key).await?;
-
-                let result = match result {
-                    Insert::None => Insert::None,
-                    Insert::Right => Insert::Right,
-                    Insert::Left(key) => {
-                        bounds[i] = key;
-
-                        if i == 0 {
-                            Insert::Left(bounds[i].clone())
-                        } else {
-                            Insert::Right
-                        }
-                    }
-                    Insert::LeftOverflow(left, middle, child_id) => {
-                        bounds[i] = left;
-                        bounds.insert(i + 1, middle);
-                        children.insert(i + 1, child_id);
-
-                        if children.len() > schema.order() {
-                            let new_bounds: Vec<_> =
-                                bounds.drain(div_ceil(schema.order(), 2)..).collect();
-
-                            let new_children: Vec<_> =
-                                children.drain(div_ceil(schema.order(), 2)..).collect();
-
-                            let left_bound = new_bounds[0].clone();
-                            let (node_id, _) = dir.create_file_unique(
-                                Node::Index(new_bounds, new_children),
-                                schema.block_size() / 2,
-                            )?;
-
-                            Insert::Overflow(left_bound, node_id)
-                        } else if i == 0 {
-                            Insert::Left(bounds[0].clone())
-                        } else {
-                            Insert::Right
-                        }
-                    }
-                    Insert::Overflow(bound, child_id) => {
-                        bounds.insert(i + 1, bound);
-                        children.insert(i + 1, child_id);
-
-                        if children.len() > schema.order() {
-                            let new_bounds: Vec<_> =
-                                bounds.drain(div_ceil(schema.order(), 2)..).collect();
-
-                            let new_children: Vec<_> =
-                                children.drain(div_ceil(schema.order(), 2)..).collect();
-
-                            let left_bound = new_bounds[0].clone();
-                            let (node_id, _) = dir.create_file_unique(
-                                Node::Index(new_bounds, new_children),
-                                schema.block_size() / 2,
-                            )?;
-
-                            Insert::Overflow(left_bound, node_id)
-                        } else {
-                            Insert::Right
-                        }
-                    }
-                };
-
-                Ok(result)
-            }
-        }
-    })
 }
 
 #[inline]

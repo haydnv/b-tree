@@ -191,18 +191,20 @@ async fn main() -> Result<(), io::Error> {
 
             let key = vec![lo, hi, spread];
 
-            assert!(!view.contains(key.clone()).await?);
+            assert!(!view.contains(&key).await?);
             assert!(view.is_empty(&Range::with_prefix(vec![i])).await?);
 
             assert!(view.insert(key.clone()).await?);
 
-            assert!(view.contains(key).await?);
+            assert!(view.contains(&key).await?);
             assert!(!view.is_empty(&Range::with_prefix(vec![i])).await?);
-            assert!(!view.is_empty(&Range::default()).await?);
 
             assert_eq!(view.count(&Range::new(vec![], 0..i)).await?, (i as u64) - 1);
             assert_eq!(view.count(&Range::with_prefix(vec![i])).await?, 1);
             assert_eq!(view.count(&Range::default()).await?, i as u64);
+
+            #[cfg(debug_assertions)]
+            assert!(view.is_valid().await?);
         }
 
         let mut i = 1;
@@ -235,6 +237,32 @@ async fn main() -> Result<(), io::Error> {
 
             assert_eq!(view.count(&range).await?, count, "bad count at {}", i);
         }
+
+        std::mem::drop(view);
+
+        // let mut view = btree.write().await;
+        // let mut count = view.count(&Range::default()).await?;
+        // while !view.is_empty(&Range::default()).await? {
+        //     let n = view.last().await?.expect("last key")[0];
+        //     let lo = rand::thread_rng().gen_range(0..n);
+        //     let hi = i16::MAX - lo;
+        //     let spread = hi - lo;
+        //
+        //     let key = vec![lo, hi, spread];
+        //
+        //     let present = view.contains(&key).await?;
+        //     println!("key {:?} is present? {}", key, present);
+        //
+        //     assert_eq!(present, view.delete(&key).await?);
+        //     assert!(!view.contains(&key).await?);
+        //     debug_assert!(view.is_valid().await?);
+        //
+        //     if present {
+        //         count -= 1;
+        //     }
+        //
+        //     assert_eq!(view.count(&Range::default()).await?, count);
+        // }
     }
 
     // clean up
