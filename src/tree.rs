@@ -257,6 +257,7 @@ where
                 }
                 Node::Index(bounds, children) => {
                     let (l, r) = self.collator.bisect(&bounds, range);
+                    let l = if l == 0 { l } else { l - 1 };
 
                     if l == children.len() {
                         let node = self.dir.read_file(children.last().expect("last")).await?;
@@ -319,7 +320,7 @@ where
         }
     }
 
-    /// Return `true` if the given `range` of this B+ tree contains no keys.
+    /// Return `true` if the given `range` of this B+ tree contains zero keys.
     pub async fn is_empty(&self, range: &Range<S::Value>) -> Result<bool, S::Error> {
         let mut node = self.dir.read_file(&ROOT).await?;
 
@@ -359,7 +360,11 @@ where
         self.to_stream_inner(range, ROOT)
     }
 
-    fn to_stream_inner<'a>(&'a self, range: Option<&'a Range<S::Value>>, node_id: Uuid) -> ToStream<'a, FE, S::Value> {
+    fn to_stream_inner<'a>(
+        &'a self,
+        range: Option<&'a Range<S::Value>>,
+        node_id: Uuid,
+    ) -> ToStream<'a, FE, S::Value> {
         let file = self.dir.get_file(&node_id).expect("node").clone();
         let fut = file.into_read().map_ok(move |node| {
             let keys: ToStream<FE, S::Value> = {
@@ -368,7 +373,7 @@ where
                         Node::Leaf(keys) => match range {
                             None => Some(&keys[..]),
                             Some(range) => {
-                                let (l, r) = self.collator.bisect(&keys, &range);
+                                let (l, r) = self.collator.bisect(keys, range);
 
                                 let slice = if l == r && l < keys.len() {
                                     let cmp = self.collator.compare_range(&keys[l], &*range);
@@ -386,14 +391,15 @@ where
                         },
                         Node::Index(_, _) => None,
                     })
-                        .expect("leaf");
+                    .expect("leaf");
 
                     Box::pin(stream::once(future::ready(Ok(guard))))
                 } else {
                     let children = match &*node {
                         Node::Index(bounds, children) => match range {
                             Some(range) => {
-                                let (l, r) = self.collator.bisect(&bounds, &range);
+                                let (l, r) = self.collator.bisect(bounds, range);
+                                let l = if l == 0 { l } else { l - 1 };
                                 children[l..r].to_vec()
                             }
                             None => children.to_vec(),
@@ -425,6 +431,31 @@ where
 
     #[cfg(debug_assertions)]
     pub async fn is_valid(&self) -> Result<bool, io::Error> {
+        {
+            let root = self.dir.read_file(&ROOT).await?;
+
+            match &*root {
+                Node::Leaf(keys) => {
+                    assert!(self.collator.is_sorted(&keys));
+                }
+                Node::Index(bounds, children) => {
+                    assert_eq!(bounds.len(), children.len());
+                    assert!(self.collator.is_sorted(bounds));
+
+                    for (left, node_id) in bounds.iter().zip(children) {
+                        let node = self.dir.read_file(node_id).await?;
+
+                        match &*node {
+                            Node::Leaf(keys) => assert_eq!(left, &keys[0]),
+                            Node::Index(bounds, _) => assert_eq!(left, &bounds[0]),
+                        }
+
+                        assert!(self.is_valid_node(&*node).await?);
+                    }
+                }
+            }
+        }
+
         let range = Range::default();
         let count = self.count(&range).await? as usize;
         let mut contents = Vec::with_capacity(count);
@@ -441,6 +472,43 @@ where
         );
 
         Ok(true)
+    }
+
+    #[cfg(debug_assertions)]
+    fn is_valid_node<'a>(
+        &'a self,
+        node: &'a Node<S::Value>,
+    ) -> Pin<Box<dyn Future<Output = Result<bool, io::Error>> + 'a>> {
+        Box::pin(async move {
+            let order = self.schema.order();
+
+            match &*node {
+                Node::Leaf(keys) => {
+                    assert!(keys.len() >= (order / 2) - 1);
+                    assert!(keys.len() < order);
+                    assert!(self.collator.is_sorted(&keys));
+                }
+                Node::Index(bounds, children) => {
+                    assert_eq!(bounds.len(), children.len());
+                    assert!(self.collator.is_sorted(bounds));
+                    assert!(children.len() >= self.schema.order() / 2);
+                    assert!(children.len() <= order);
+
+                    for (left, node_id) in bounds.iter().zip(children) {
+                        let node = self.dir.read_file(node_id).await?;
+
+                        match &*node {
+                            Node::Leaf(keys) => assert_eq!(left, &keys[0]),
+                            Node::Index(bounds, _) => assert_eq!(left, &bounds[0]),
+                        }
+
+                        assert!(self.is_valid_node(&*node).await?);
+                    }
+                }
+            }
+
+            Ok(true)
+        })
     }
 }
 
@@ -490,6 +558,7 @@ where
             }
             Node::Index(bounds, children) => {
                 let (l, r) = collator.bisect(&bounds, &range);
+                let l = if l == 0 { l } else { l - 1 };
 
                 if l == children.len() {
                     into_stream(dir, collator, range, children[l - 1])

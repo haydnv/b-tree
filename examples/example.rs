@@ -182,7 +182,7 @@ async fn main() -> Result<(), io::Error> {
         assert!(view.is_empty(&Range::default()).await?);
         assert_eq!(view.count(&Range::default()).await?, 0);
 
-        let n = 250;
+        let n = 400;
 
         for i in 1..n {
             let lo = i;
@@ -208,6 +208,30 @@ async fn main() -> Result<(), io::Error> {
         }
 
         let mut i = 1;
+
+        {
+            let range = Range::new(vec![], 0..67);
+            let mut nodes = view.to_stream(&range);
+            while let Some(node) = nodes.try_next().await? {
+                for key in &*node {
+                    assert_eq!(key[0], i);
+                    i += 1;
+                }
+            }
+        }
+
+        {
+            let range = Range::new(vec![], 67..250);
+            let mut nodes = view.to_stream(&range);
+            while let Some(node) = nodes.try_next().await? {
+                for key in &*node {
+                    assert_eq!(key[0], i);
+                    i += 1;
+                }
+            }
+        }
+
+        let mut i = 1;
         let mut keys = view.into_stream(Range::new(vec![], 0..123));
         while let Some(key) = keys.try_next().await? {
             assert_eq!(key[0], i);
@@ -215,7 +239,7 @@ async fn main() -> Result<(), io::Error> {
         }
 
         let view = btree.read().await;
-        let mut keys = view.into_stream(Range::new(vec![], 123..250));
+        let mut keys = view.into_stream(Range::new(vec![], 123..n));
         while let Some(key) = keys.try_next().await? {
             assert_eq!(key[0], i);
             i += 1;
