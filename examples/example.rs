@@ -159,8 +159,7 @@ async fn setup_tmp_dir() -> Result<PathBuf, io::Error> {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), io::Error> {
+async fn functional_test() -> Result<(), io::Error> {
     // set up the test directory
     let path = setup_tmp_dir().await?;
 
@@ -295,10 +294,70 @@ async fn main() -> Result<(), io::Error> {
 
             assert_eq!(view.count(&Range::default()).await?, count);
         }
+
+        assert_eq!(view.into_stream(Range::default()).try_next().await?, None);
     }
 
     // clean up
     fs::remove_dir_all(path).await
+}
+
+async fn load_test() -> Result<(), io::Error> {
+    let n = 100_000;
+
+    // set up the test directory
+    let path = setup_tmp_dir().await?;
+
+    // construct the schema
+    let schema = ExampleSchema::<i16>::new(3);
+
+    // initialize the cache
+    let cache = Cache::<File>::new(schema.block_size() * n, None);
+
+    // load the directory and file paths into memory (not file contents, yet)
+    let dir = cache.load(path.clone())?;
+
+    // create a new B+ tree
+    let btree = BTreeLock::create(schema, Collator::<i16>::default(), dir)?;
+
+    {
+        let mut view = btree.write().await;
+
+        assert!(view.is_empty(&Range::default()).await?);
+        assert_eq!(view.count(&Range::default()).await?, 0);
+
+        for _ in 0..(n / 2) {
+            let i: i16 = rand::thread_rng().gen_range(i16::MIN..i16::MAX);
+            let key = vec![i, i / 2, i % 2];
+            view.insert(key).await?;
+        }
+
+        for _ in (n / 2)..n {
+            let i: i16 = rand::thread_rng().gen_range(i16::MIN..i16::MAX);
+            let key = vec![i, i / 2, i % 2];
+            view.insert(key).await?;
+
+            let i: i16 = rand::thread_rng().gen_range(i16::MIN..i16::MAX);
+            let key = vec![i, i / 2, i % 2];
+            view.delete(key).await?;
+        }
+
+        for _ in 0..(n / 2) {
+            let i: i16 = rand::thread_rng().gen_range(i16::MIN..i16::MAX);
+            let key = vec![i, i / 2, i % 2];
+            view.delete(key).await?;
+        }
+    }
+
+    // clean up
+    fs::remove_dir_all(path).await
+}
+
+#[tokio::main]
+async fn main() -> Result<(), io::Error> {
+    load_test().await?;
+    functional_test().await?;
+    Ok(())
 }
 
 async fn count_keys(
