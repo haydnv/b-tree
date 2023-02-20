@@ -236,7 +236,6 @@ mod tests {
 
     #[test]
     fn test_range() {
-        // TODO: why do some of these asserts fail?
         let block = vec![
             vec![0, -1, 1],
             vec![1, -1, 2],
@@ -255,8 +254,11 @@ mod tests {
         let range = Range::from(([], 0..1));
         assert_eq!(collator.bisect(&block, &range), (0, 1));
 
-        // let range = Range::from(([1], 0..1));
-        // assert_eq!(collator.bisect(&block, &range), (2, 4));
+        let range = Range::from(([1], 0..1));
+        assert_eq!(collator.bisect(&block, &range), (2, 4));
+
+        let range = Range::from(([], 4..5));
+        assert_eq!(collator.bisect(&block, &range), (block.len(), block.len()));
 
         assert_eq!(collator.bisect(&block, &Range::default()), (0, block.len()));
     }

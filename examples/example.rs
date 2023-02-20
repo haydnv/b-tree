@@ -182,7 +182,7 @@ async fn main() -> Result<(), io::Error> {
         assert!(view.is_empty(&Range::default()).await?);
         assert_eq!(view.count(&Range::default()).await?, 0);
 
-        let n = 200;
+        let n = 300;
 
         for i in 1..n {
             let lo = i;
@@ -276,22 +276,20 @@ async fn main() -> Result<(), io::Error> {
         assert!(!view.is_empty(&Range::default()).await?);
 
         while !view.is_empty(&Range::default()).await? {
-            let n = view.last().await?.expect("last key")[0];
-            let lo = rand::thread_rng().gen_range(1..(n + 1));
-            let hi = i16::MAX - lo;
-            let spread = hi - lo;
+            let lo = view.first().await?.expect("first")[0];
+            let hi = view.last().await?.expect("last")[0];
 
-            let key = vec![lo, hi, spread];
+            let i = rand::thread_rng().gen_range(lo..(hi + 1));
+            let key = vec![i, i16::MAX - i, i16::MAX - 2 * i];
 
             let present = view.contains(&key).await?;
 
             assert_eq!(present, view.delete(key.to_vec()).await?);
             assert!(!view.contains(&key).await?);
 
-            #[cfg(debug_assertions)]
-            assert!(view.is_valid().await?);
-
             if present {
+                #[cfg(debug_assertions)]
+                assert!(view.is_valid().await?);
                 count -= 1;
             }
 

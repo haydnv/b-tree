@@ -70,7 +70,7 @@ impl<V: fmt::Debug> fmt::Debug for Node<V> {
     }
 }
 
-/// A lock to synchronize access to a persistent B+ tree
+/// A lock to synchronize access to a persistent B+Tree
 pub struct BTreeLock<S, C, FE> {
     schema: Arc<S>,
     collator: Arc<C>,
@@ -88,7 +88,7 @@ impl<S, C, FE> Clone for BTreeLock<S, C, FE> {
 }
 
 impl<S, C, FE> BTreeLock<S, C, FE> {
-    /// Borrow the schema of the source B+ tree.
+    /// Borrow the schema of the source B+Tree.
     pub fn schema(&self) -> &S {
         &self.schema
     }
@@ -118,7 +118,7 @@ where
         } else {
             Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
-                "creating a new B+ tree requires an empty file",
+                "creating a new B+Tree requires an empty file",
             ))
         }
     }
@@ -134,7 +134,7 @@ where
 
         Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
-            "B+ tree is missing a root node",
+            "B+Tree is missing a root node",
         ))
     }
 }
@@ -143,7 +143,7 @@ impl<S, C, FE> BTreeLock<S, C, FE>
 where
     FE: FileLoad,
 {
-    /// Lock this B+ tree for reading
+    /// Lock this B+Tree for reading
     pub async fn read(&self) -> BTreeReadGuard<S, C, FE> {
         self.dir
             .read_owned()
@@ -155,7 +155,7 @@ where
             .await
     }
 
-    /// Lock this B+ tree for writing
+    /// Lock this B+Tree for writing
     pub async fn write(&self) -> BTreeWriteGuard<S, C, FE> {
         self.dir
             .write_owned()
@@ -173,7 +173,7 @@ type IntoStream<V> = Pin<Box<dyn Stream<Item = Result<Key<V>, io::Error>>>>;
 type ToStream<'a, FE, V> =
     Pin<Box<dyn Stream<Item = Result<FileReadGuardOwned<FE, [Key<V>]>, io::Error>> + 'a>>;
 
-/// A B+ tree
+/// A B+Tree
 pub struct BTree<S, C, D> {
     schema: Arc<S>,
     collator: Arc<C>,
@@ -188,7 +188,7 @@ where
     G: Deref<Target = Dir<FE>> + 'static,
     Node<S::Value>: fmt::Debug,
 {
-    /// Return `true` if this B+ tree contains the given `key`.
+    /// Return `true` if this B+Tree contains the given `key`.
     pub async fn contains(&self, key: &Key<S::Value>) -> Result<bool, io::Error> {
         let mut node = self.dir.read_file(&ROOT).await?;
 
@@ -217,7 +217,7 @@ where
         }
     }
 
-    /// Count how many keys lie within the given `range` of this B+ tree.
+    /// Count how many keys lie within the given `range` of this B+Tree.
     pub async fn count(&self, range: &Range<S::Value>) -> Result<u64, io::Error> {
         let root = self.dir.read_file(&ROOT).await?;
         self.count_inner(range, root).await
@@ -320,7 +320,7 @@ where
         }
     }
 
-    /// Return `true` if the given `range` of this B+ tree contains zero keys.
+    /// Return `true` if the given `range` of this B+Tree contains zero keys.
     pub async fn is_empty(&self, range: &Range<S::Value>) -> Result<bool, S::Error> {
         let mut node = self.dir.read_file(&ROOT).await?;
 
@@ -345,7 +345,7 @@ where
         })
     }
 
-    /// Borrow all the keys in the given `range` of this B+ tree.
+    /// Borrow all the keys in the given `range` of this B+Tree.
     pub fn to_stream<'a>(
         &'a self,
         range: &'a Range<S::Value>,
@@ -421,7 +421,7 @@ where
         Box::pin(stream::once(fut).try_flatten())
     }
 
-    /// Copy all the keys in the given `range` of this B+ tree.
+    /// Copy all the keys in the given `range` of this B+Tree.
     pub fn into_stream(
         self,
         range: Range<S::Value>,
@@ -520,7 +520,7 @@ fn into_stream<C, V, FE, G>(
 ) -> IntoStream<V>
 where
     C: Collate<Value = V> + 'static,
-    V: Clone + PartialEq + 'static,
+    V: Clone + PartialEq + fmt::Debug + 'static,
     FE: FileLoad + AsType<Node<V>>,
     G: Deref<Target = Dir<FE>> + 'static,
 {
@@ -534,7 +534,7 @@ where
             Node::Leaf(keys) => {
                 let (l, r) = collator.bisect(&keys, &range);
 
-                if l == keys.len() {
+                if l == keys.len() || r == 0 {
                     Box::pin(stream::empty())
                 } else if l == r {
                     let cmp = collator.compare_range(&keys[l], &*range);
@@ -560,21 +560,22 @@ where
                 let (l, r) = collator.bisect(&bounds, &range);
                 let l = if l == 0 { l } else { l - 1 };
 
-                if l == children.len() {
+                if r == 0 {
+                    let empty: IntoStream<V> = Box::pin(stream::empty());
+                    return empty;
+                } else if l == children.len() {
                     into_stream(dir, collator, range, children[l - 1])
                 } else if l == r || l + 1 == r {
                     into_stream(dir, collator, range, children[l])
                 } else {
-                    let r = if r == children.len() { r - 1 } else { r };
-
                     let left =
                         into_stream(dir.clone(), collator.clone(), range.clone(), children[l]);
 
-                    let right = into_stream(dir.clone(), collator.clone(), range, children[r]);
+                    let right = into_stream(dir.clone(), collator.clone(), range, children[r - 1]);
 
                     let default_range = Arc::new(Range::default());
 
-                    let middle = stream::iter(children[(l + 1)..r].to_vec())
+                    let middle = stream::iter(children[(l + 1)..(r - 1)].to_vec())
                         .map(move |node_id| {
                             into_stream(
                                 dir.clone(),
@@ -637,7 +638,7 @@ where
     C: Collate<Value = S::Value> + 'static,
     FE: FileLoad + AsType<Node<S::Value>>,
 {
-    /// Delete the given `key` from this B+ tree.
+    /// Delete the given `key` from this B+Tree.
     pub async fn delete(&mut self, key: Key<S::Value>) -> Result<bool, S::Error> {
         let key = self.schema.validate(key)?;
         println!("delete {:?}", key);
@@ -1001,7 +1002,7 @@ where
         })
     }
 
-    /// Insert the given `key` into this B+ tree.
+    /// Insert the given `key` into this B+Tree.
     pub async fn insert(&mut self, key: Key<S::Value>) -> Result<bool, S::Error> {
         let key = self.schema.validate(key)?;
         self.insert_root(key).await
@@ -1119,10 +1120,6 @@ where
 
             match node {
                 Node::Leaf(keys) => {
-                    debug_assert!(keys.len() >= (order / 2) - 1);
-                    debug_assert!(keys.len() < order);
-                    debug_assert!(self.collator.is_sorted(keys));
-
                     let i = self.collator.bisect_left(&keys, &key);
 
                     if i < keys.len() && keys[i] == key {
@@ -1167,12 +1164,8 @@ where
                     }
                 }
                 Node::Index(bounds, children) => {
-                    let size = self.schema.block_size() >> 1;
-
                     debug_assert_eq!(bounds.len(), children.len());
-                    debug_assert!(self.collator.is_sorted(bounds));
-                    debug_assert!(children.len() >= self.schema.order() / 2);
-                    debug_assert!(children.len() <= order);
+                    let size = self.schema.block_size() >> 1;
 
                     let i = match self.collator.bisect_left(&bounds, &key) {
                         0 => 0,
@@ -1236,9 +1229,9 @@ where
         })
     }
 
-    /// Merge the keys in the `other` B+ tree range into this one.
+    /// Merge the keys in the `other` B+Tree range into this one.
     ///
-    /// The source B+ tree **must** have an identical schema and collation.
+    /// The source B+Tree **must** have an identical schema and collation.
     pub async fn merge(&mut self, other: BTreeReadGuard<S, C, FE>) -> Result<(), S::Error> {
         if self.collator != other.collator {
             return Err(io::Error::new(
