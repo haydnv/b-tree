@@ -182,7 +182,7 @@ async fn main() -> Result<(), io::Error> {
         assert!(view.is_empty(&Range::default()).await?);
         assert_eq!(view.count(&Range::default()).await?, 0);
 
-        let n = 15;
+        let n = 200;
 
         for i in 1..n {
             let lo = i;

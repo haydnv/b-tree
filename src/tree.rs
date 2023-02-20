@@ -596,12 +596,22 @@ where
     Box::pin(stream::once(fut).try_flatten())
 }
 
-enum MergeLeft<V> {
+enum MergeIndexLeft<V> {
     Borrow(Key<V>),
     Merge(Key<V>),
 }
 
-enum MergeRight {
+enum MergeIndexRight {
+    Borrow,
+    Merge,
+}
+
+enum MergeLeafLeft<V> {
+    Borrow(Key<V>),
+    Merge(Key<V>),
+}
+
+enum MergeLeafRight {
     Borrow,
     Merge,
 }
@@ -660,39 +670,11 @@ where
                     }
                     Delete::Underflow(mut node) => match &mut *node {
                         Node::Leaf(new_keys) => {
-                            if i == 0 {
-                                println!("merge leaf left");
-                                match self.merge_leaf_left(new_keys, &children[i + 1]).await? {
-                                    MergeLeft::Borrow(bound) => {
-                                        bounds[i] = new_keys[0].to_vec();
-                                        bounds[i + 1] = bound;
-                                    }
-                                    MergeLeft::Merge(bound) => {
-                                        println!("delete child 0, new bound is {:?}", bound);
-                                        assert!(self.dir.delete(children[0].to_string()).await);
-                                        children.remove(0);
-                                        bounds.remove(0);
-                                        bounds[0] = bound;
-                                    }
-                                }
-                            } else {
-                                println!("merge leaf right");
-                                match self.merge_leaf_right(new_keys, &children[i - 1]).await? {
-                                    MergeRight::Borrow => {
-                                        println!("bound {} is now {:?}", i, new_keys[0]);
-                                        bounds[i] = new_keys[0].to_vec();
-                                    }
-                                    MergeRight::Merge => {
-                                        println!("delete child {}", i);
-                                        self.dir.delete(children[i].to_string()).await;
-                                        children.remove(i);
-                                        bounds.remove(i);
-                                    }
-                                }
-                            }
+                            self.merge_leaf(new_keys, i, bounds, children).await?
                         }
-                        Node::Index(bounds, children) => {
-                            todo!()
+                        Node::Index(new_bounds, new_children) => {
+                            self.merge_index(new_bounds, new_children, i, bounds, children)
+                                .await?
                         }
                     },
                 }
@@ -757,8 +739,8 @@ where
                         i => i - 1,
                     };
 
-                    let node = self.dir.write_file_owned(&children[i]).await?;
-                    match self.delete_inner(node, key).await? {
+                    let child = self.dir.write_file_owned(&children[i]).await?;
+                    match self.delete_inner(child, key).await? {
                         Delete::None => return Ok(Delete::None),
                         Delete::Right => return Ok(Delete::Right),
                         Delete::Left(bound) => {
@@ -768,43 +750,15 @@ where
                                 Ok(Delete::Left(bounds[0].to_vec()))
                             } else {
                                 Ok(Delete::Right)
-                            }
+                            };
                         }
                         Delete::Underflow(mut node) => match &mut *node {
                             Node::Leaf(new_keys) => {
-                                if i == 0 {
-                                    println!("merge leaf left");
-                                    match self.merge_leaf_left(new_keys, &children[i + 1]).await? {
-                                        MergeLeft::Borrow(bound) => {
-                                            bounds[i] = new_keys[0].to_vec();
-                                            bounds[i + 1] = bound;
-                                        }
-                                        MergeLeft::Merge(bound) => {
-                                            println!("delete child 0, new bound is {:?}", bound);
-                                            assert!(self.dir.delete(children[0].to_string()).await);
-                                            children.remove(0);
-                                            bounds.remove(0);
-                                            bounds[0] = bound;
-                                        }
-                                    }
-                                } else {
-                                    println!("merge leaf right");
-                                    match self.merge_leaf_right(new_keys, &children[i - 1]).await? {
-                                        MergeRight::Borrow => {
-                                            println!("bound {} is now {:?}", i, new_keys[0]);
-                                            bounds[i] = new_keys[0].to_vec();
-                                        }
-                                        MergeRight::Merge => {
-                                            println!("delete child {}", i);
-                                            self.dir.delete(children[i].to_string()).await;
-                                            children.remove(i);
-                                            bounds.remove(i);
-                                        }
-                                    }
-                                }
+                                self.merge_leaf(new_keys, i, bounds, children).await?
                             }
-                            Node::Index(bounds, children) => {
-                                todo!()
+                            Node::Index(new_bounds, new_children) => {
+                                self.merge_index(new_bounds, new_children, i, bounds, children)
+                                    .await?
                             }
                         },
                     }
@@ -816,10 +770,172 @@ where
                             Ok(Delete::Right)
                         }
                     } else {
-                        todo!()
+                        Ok(Delete::Underflow(node))
                     }
                 }
             }
+        })
+    }
+
+    fn merge_index<'a>(
+        &'a mut self,
+        new_bounds: &'a mut Vec<Key<S::Value>>,
+        new_children: &'a mut Vec<Uuid>,
+        i: usize,
+        bounds: &'a mut Vec<Key<S::Value>>,
+        children: &'a mut Vec<Uuid>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + 'a>> {
+        Box::pin(async move {
+            if i == 0 {
+                println!("merge index left");
+                match self
+                    .merge_index_left(new_bounds, new_children, &children[i + 1])
+                    .await?
+                {
+                    MergeIndexLeft::Borrow(bound) => {
+                        bounds[i] = new_bounds[0].to_vec();
+                        println!("bound {} is now {:?}", i, bounds[i]);
+                        println!("bound {} is now {:?}", i + 1, bounds[i + 1]);
+                        bounds[i + 1] = bound;
+                    }
+                    MergeIndexLeft::Merge(bound) => {
+                        println!("delete child 0, new bound is {:?}", bound);
+                        assert!(self.dir.delete(children[0].to_string()).await);
+                        children.remove(0);
+                        bounds.remove(0);
+                        bounds[0] = bound;
+                    }
+                }
+            } else {
+                println!("merge index right");
+                match self
+                    .merge_index_right(new_bounds, new_children, &children[i - 1])
+                    .await?
+                {
+                    MergeIndexRight::Borrow => {
+                        bounds[i] = new_bounds[0].to_vec();
+                        println!("bound {} is now {:?}", i, new_bounds[0]);
+                    }
+                    MergeIndexRight::Merge => {
+                        println!("delete child {}", i);
+                        self.dir.delete(children[i].to_string()).await;
+                        children.remove(i);
+                        bounds.remove(i);
+                    }
+                }
+            }
+
+            Ok(())
+        })
+    }
+
+    fn merge_index_left<'a>(
+        &'a self,
+        left_bounds: &'a mut Vec<Key<S::Value>>,
+        left_children: &'a mut Vec<Uuid>,
+        node_id: &'a Uuid,
+    ) -> Pin<Box<dyn Future<Output = Result<MergeIndexLeft<S::Value>, io::Error>> + 'a>> {
+        Box::pin(async move {
+            let mut node = self.dir.write_file(node_id).await?;
+
+            match &mut *node {
+                Node::Leaf(_right_keys) => unreachable!("merge a leaf node with an index node"),
+                Node::Index(right_bounds, right_children) => {
+                    if right_bounds.len() > (self.schema.order() / 2) {
+                        left_bounds.push(right_bounds.remove(0));
+                        left_children.push(right_children.remove(0));
+                        Ok(MergeIndexLeft::Borrow(right_bounds[0].to_vec()))
+                    } else {
+                        let mut new_bounds =
+                            Vec::with_capacity(left_bounds.len() + right_bounds.len());
+
+                        new_bounds.extend(left_bounds.drain(..));
+                        new_bounds.extend(right_bounds.drain(..));
+                        *right_bounds = new_bounds;
+
+                        let mut new_children = Vec::with_capacity(right_bounds.len());
+
+                        new_children.extend(left_children.drain(..));
+                        new_children.extend(right_children.drain(..));
+                        *right_children = new_children;
+
+                        Ok(MergeIndexLeft::Merge(right_bounds[0].to_vec()))
+                    }
+                }
+            }
+        })
+    }
+
+    fn merge_index_right<'a>(
+        &'a self,
+        right_bounds: &'a mut Vec<Key<S::Value>>,
+        right_children: &'a mut Vec<Uuid>,
+        node_id: &'a Uuid,
+    ) -> Pin<Box<dyn Future<Output = Result<MergeIndexRight, io::Error>> + 'a>> {
+        Box::pin(async move {
+            let mut node = self.dir.write_file(node_id).await?;
+
+            match &mut *node {
+                Node::Leaf(_left_keys) => unreachable!("merge a leaf node with an index node"),
+                Node::Index(left_bounds, left_children) => {
+                    if left_children.len() > (self.schema.order() / 2) {
+                        let right = left_bounds.pop().expect("right");
+                        right_bounds.insert(0, right);
+
+                        let right = left_children.pop().expect("right");
+                        right_children.insert(0, right);
+
+                        Ok(MergeIndexRight::Borrow)
+                    } else {
+                        left_bounds.extend(right_bounds.drain(..));
+                        left_children.extend(right_children.drain(..));
+                        Ok(MergeIndexRight::Merge)
+                    }
+                }
+            }
+        })
+    }
+
+    fn merge_leaf<'a>(
+        &'a mut self,
+        new_keys: &'a mut Vec<Key<S::Value>>,
+        i: usize,
+        bounds: &'a mut Vec<Key<S::Value>>,
+        children: &'a mut Vec<Uuid>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + 'a>> {
+        Box::pin(async move {
+            if i == 0 {
+                println!("merge leaf left");
+                match self.merge_leaf_left(new_keys, &children[i + 1]).await? {
+                    MergeLeafLeft::Borrow(bound) => {
+                        bounds[i] = new_keys[0].to_vec();
+                        bounds[i + 1] = bound;
+                    }
+                    MergeLeafLeft::Merge(bound) => {
+                        println!("delete child 0, new bound is {:?}", bound);
+                        assert!(self.dir.delete(children[0].to_string()).await);
+                        children.remove(0);
+                        bounds.remove(0);
+                        bounds[0] = bound;
+                    }
+                }
+            } else {
+                println!("merge leaf right");
+                match self.merge_leaf_right(new_keys, &children[i - 1]).await? {
+                    MergeLeafRight::Borrow => {
+                        println!("bound {} is now {:?}", i, new_keys[0]);
+                        bounds[i] = new_keys[0].to_vec();
+                    }
+                    MergeLeafRight::Merge => {
+                        println!("delete child {}", i);
+                        self.dir.delete(children[i].to_string()).await;
+                        children.remove(i);
+                        bounds.remove(i);
+                    }
+                }
+            }
+
+            Ok(())
         })
     }
 
@@ -827,7 +943,7 @@ where
         &'a self,
         left_keys: &'a mut Vec<Key<S::Value>>,
         node_id: &'a Uuid,
-    ) -> Pin<Box<dyn Future<Output = Result<MergeLeft<S::Value>, io::Error>> + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<MergeLeafLeft<S::Value>, io::Error>> + 'a>> {
         Box::pin(async move {
             let mut node = self.dir.write_file(node_id).await?;
 
@@ -835,25 +951,25 @@ where
                 Node::Leaf(right_keys) => {
                     if right_keys.len() > (self.schema.order() / 2) {
                         left_keys.push(right_keys.remove(0));
-                        Ok(MergeLeft::Borrow(right_keys[0].to_vec()))
+                        Ok(MergeLeafLeft::Borrow(right_keys[0].to_vec()))
                     } else {
                         let mut new_keys = Vec::with_capacity(left_keys.len() + right_keys.len());
                         new_keys.extend(left_keys.drain(..));
                         new_keys.extend(right_keys.drain(..));
                         *right_keys = new_keys;
 
-                        Ok(MergeLeft::Merge(right_keys[0].to_vec()))
+                        Ok(MergeLeafLeft::Merge(right_keys[0].to_vec()))
                     }
                 }
                 Node::Index(bounds, children) => {
                     match self.merge_leaf_left(left_keys, &children[0]).await? {
-                        MergeLeft::Borrow(left) => {
+                        MergeLeafLeft::Borrow(left) => {
                             bounds[0] = left.to_vec();
-                            Ok(MergeLeft::Borrow(left))
+                            Ok(MergeLeafLeft::Borrow(left))
                         }
-                        MergeLeft::Merge(left) => {
+                        MergeLeafLeft::Merge(left) => {
                             bounds[0] = left.to_vec();
-                            Ok(MergeLeft::Merge(left))
+                            Ok(MergeLeafLeft::Merge(left))
                         }
                     }
                 }
@@ -865,7 +981,7 @@ where
         &'a self,
         right_keys: &'a mut Vec<Key<S::Value>>,
         node_id: &'a Uuid,
-    ) -> Pin<Box<dyn Future<Output = Result<MergeRight, io::Error>> + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<MergeLeafRight, io::Error>> + 'a>> {
         Box::pin(async move {
             let mut node = self.dir.write_file(node_id).await?;
 
@@ -874,25 +990,13 @@ where
                     if left_keys.len() > (self.schema.order() / 2) {
                         let right = left_keys.pop().expect("right");
                         right_keys.insert(0, right);
-                        Ok(MergeRight::Borrow)
+                        Ok(MergeLeafRight::Borrow)
                     } else {
                         left_keys.extend(right_keys.drain(..));
-                        Ok(MergeRight::Merge)
+                        Ok(MergeLeafRight::Merge)
                     }
                 }
-                Node::Index(bounds, children) => {
-                    match self
-                        .merge_leaf_right(right_keys, children.last().expect("right"))
-                        .await?
-                    {
-                        MergeRight::Borrow => {
-                            todo!()
-                        }
-                        MergeRight::Merge => {
-                            todo!()
-                        }
-                    }
-                }
+                Node::Index(_bounds, _children) => unreachable!("merge with the rightmost leaf"),
             }
         })
     }
