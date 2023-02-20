@@ -806,7 +806,7 @@ where
                 }
             };
 
-            self.dir.delete(only_child.to_string()).await;
+            self.dir.delete(&only_child).await;
 
             *root = new_root;
         }
@@ -901,7 +901,7 @@ where
                         bounds[i + 1] = bound;
                     }
                     MergeIndexLeft::Merge(bound) => {
-                        self.dir.delete(children[0].to_string()).await;
+                        self.dir.delete(&children[0]).await;
                         children.remove(0);
                         bounds.remove(0);
                         bounds[0] = bound;
@@ -916,7 +916,7 @@ where
                         bounds[i] = new_bounds[0].to_vec();
                     }
                     MergeIndexRight::Merge => {
-                        self.dir.delete(children[i].to_string()).await;
+                        self.dir.delete(&children[i]).await;
                         children.remove(i);
                         bounds.remove(i);
                     }
@@ -1009,7 +1009,7 @@ where
                         bounds[i + 1] = bound;
                     }
                     MergeLeafLeft::Merge(bound) => {
-                        self.dir.delete(children[0].to_string()).await;
+                        self.dir.delete(&children[0]).await;
                         children.remove(0);
                         bounds.remove(0);
                         bounds[0] = bound;
@@ -1021,7 +1021,7 @@ where
                         bounds[i] = new_keys[0].to_vec();
                     }
                     MergeLeafRight::Merge => {
-                        self.dir.delete(children[i].to_string()).await;
+                        self.dir.delete(&children[i]).await;
                         children.remove(i);
                         bounds.remove(i);
                     }
