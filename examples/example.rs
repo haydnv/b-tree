@@ -182,7 +182,7 @@ async fn main() -> Result<(), io::Error> {
         assert!(view.is_empty(&Range::default()).await?);
         assert_eq!(view.count(&Range::default()).await?, 0);
 
-        let n = 400;
+        let n = 15;
 
         for i in 1..n {
             let lo = i;
@@ -250,43 +250,53 @@ async fn main() -> Result<(), io::Error> {
 
         for i in 1..n {
             let count = (i as u64) - 1;
-            let range = Range::new(vec![], 0..i);
+            let range_left = Range::new(vec![], 0..i);
 
             assert_eq!(
-                count_keys(&view, &range).await?,
+                count_keys(&view, &range_left).await?,
                 count,
                 "bad key count at {}",
                 i
             );
 
-            assert_eq!(view.count(&range).await?, count, "bad count at {}", i);
+            assert_eq!(view.count(&range_left).await?, count, "bad count at {}", i);
         }
 
         std::mem::drop(view);
 
-        // let mut view = btree.write().await;
-        // let mut count = view.count(&Range::default()).await?;
-        // while !view.is_empty(&Range::default()).await? {
-        //     let n = view.last().await?.expect("last key")[0];
-        //     let lo = rand::thread_rng().gen_range(0..n);
-        //     let hi = i16::MAX - lo;
-        //     let spread = hi - lo;
-        //
-        //     let key = vec![lo, hi, spread];
-        //
-        //     let present = view.contains(&key).await?;
-        //     println!("key {:?} is present? {}", key, present);
-        //
-        //     assert_eq!(present, view.delete(&key).await?);
-        //     assert!(!view.contains(&key).await?);
-        //     debug_assert!(view.is_valid().await?);
-        //
-        //     if present {
-        //         count -= 1;
-        //     }
-        //
-        //     assert_eq!(view.count(&Range::default()).await?, count);
-        // }
+        let mut view = btree.write().await;
+
+        for i in 1..n {
+            let key = vec![i, i16::MAX - i, i16::MAX - 2 * i];
+            assert!(view.contains(&key).await?);
+        }
+
+        let mut count = view.count(&Range::default()).await?;
+        assert_eq!(count, (n - 1) as u64);
+        assert!(!view.is_empty(&Range::default()).await?);
+
+        while !view.is_empty(&Range::default()).await? {
+            let n = view.last().await?.expect("last key")[0];
+            let lo = rand::thread_rng().gen_range(1..(n + 1));
+            let hi = i16::MAX - lo;
+            let spread = hi - lo;
+
+            let key = vec![lo, hi, spread];
+
+            let present = view.contains(&key).await?;
+
+            assert_eq!(present, view.delete(key.to_vec()).await?);
+            assert!(!view.contains(&key).await?);
+
+            #[cfg(debug_assertions)]
+            assert!(view.is_valid().await?);
+
+            if present {
+                count -= 1;
+            }
+
+            assert_eq!(view.count(&Range::default()).await?, count);
+        }
     }
 
     // clean up

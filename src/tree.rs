@@ -596,6 +596,23 @@ where
     Box::pin(stream::once(fut).try_flatten())
 }
 
+enum MergeLeft<V> {
+    Borrow(Key<V>),
+    Merge(Key<V>),
+}
+
+enum MergeRight {
+    Borrow,
+    Merge,
+}
+
+enum Delete<FE, V> {
+    None,
+    Left(Key<V>),
+    Right,
+    Underflow(FileWriteGuardOwned<FE, Node<V>>),
+}
+
 enum Insert<V> {
     None,
     Left(Key<V>),
@@ -610,6 +627,276 @@ where
     C: Collate<Value = S::Value> + 'static,
     FE: FileLoad + AsType<Node<S::Value>>,
 {
+    /// Delete the given `key` from this B+ tree.
+    pub async fn delete(&mut self, key: Key<S::Value>) -> Result<bool, S::Error> {
+        let key = self.schema.validate(key)?;
+        println!("delete {:?}", key);
+
+        let mut root = self.dir.write_file_owned(&ROOT).await?;
+
+        let new_root = match &mut *root {
+            Node::Leaf(keys) => {
+                let i = self.collator.bisect_left(&keys, &key);
+                if i < keys.len() && &keys[i] == &key {
+                    keys.remove(i);
+                    return Ok(true);
+                } else {
+                    return Ok(false);
+                }
+            }
+            Node::Index(bounds, children) => {
+                let i = match self.collator.bisect_right(bounds, &key) {
+                    0 => return Ok(false),
+                    i => i - 1,
+                };
+
+                let node = self.dir.write_file_owned(&children[i]).await?;
+                match self.delete_inner(node, &key).await? {
+                    Delete::None => return Ok(false),
+                    Delete::Right => return Ok(true),
+                    Delete::Left(bound) => {
+                        bounds[i] = bound;
+                        return Ok(true);
+                    }
+                    Delete::Underflow(mut node) => match &mut *node {
+                        Node::Leaf(new_keys) => {
+                            if i == 0 {
+                                println!("merge leaf left");
+                                match self.merge_leaf_left(new_keys, &children[i + 1]).await? {
+                                    MergeLeft::Borrow(bound) => {
+                                        bounds[i] = new_keys[0].to_vec();
+                                        bounds[i + 1] = bound;
+                                    }
+                                    MergeLeft::Merge(bound) => {
+                                        println!("delete child 0, new bound is {:?}", bound);
+                                        assert!(self.dir.delete(children[0].to_string()).await);
+                                        children.remove(0);
+                                        bounds.remove(0);
+                                        bounds[0] = bound;
+                                    }
+                                }
+                            } else {
+                                println!("merge leaf right");
+                                match self.merge_leaf_right(new_keys, &children[i - 1]).await? {
+                                    MergeRight::Borrow => {
+                                        println!("bound {} is now {:?}", i, new_keys[0]);
+                                        bounds[i] = new_keys[0].to_vec();
+                                    }
+                                    MergeRight::Merge => {
+                                        println!("delete child {}", i);
+                                        self.dir.delete(children[i].to_string()).await;
+                                        children.remove(i);
+                                        bounds.remove(i);
+                                    }
+                                }
+                            }
+                        }
+                        Node::Index(bounds, children) => {
+                            todo!()
+                        }
+                    },
+                }
+
+                if children.len() == 1 {
+                    bounds.pop();
+                    children.pop()
+                } else {
+                    None
+                }
+            }
+        };
+
+        if let Some(only_child) = new_root {
+            let new_root = {
+                let mut child = self.dir.write_file(&only_child).await?;
+                match &mut *child {
+                    Node::Leaf(keys) => Node::Leaf(keys.drain(..).collect()),
+                    Node::Index(bounds, children) => {
+                        Node::Index(bounds.drain(..).collect(), children.drain(..).collect())
+                    }
+                }
+            };
+
+            self.dir.delete(only_child.to_string()).await;
+
+            *root = new_root;
+        }
+
+        Ok(true)
+    }
+
+    fn delete_inner<'a>(
+        &'a mut self,
+        mut node: FileWriteGuardOwned<FE, Node<S::Value>>,
+        key: &'a Key<S::Value>,
+    ) -> Pin<Box<dyn Future<Output = Result<Delete<FE, S::Value>, io::Error>> + 'a>> {
+        Box::pin(async move {
+            match &mut *node {
+                Node::Leaf(keys) => {
+                    let i = self.collator.bisect_left(keys, key);
+
+                    if i < keys.len() && &keys[i] == key {
+                        keys.remove(i);
+                        println!("deleted key {:?} at {}", key, i);
+
+                        if keys.len() < (self.schema.order() / 2) {
+                            println!("underflow");
+                            Ok(Delete::Underflow(node))
+                        } else if i == 0 {
+                            Ok(Delete::Left(keys[0].clone()))
+                        } else {
+                            Ok(Delete::Right)
+                        }
+                    } else {
+                        Ok(Delete::None)
+                    }
+                }
+                Node::Index(bounds, children) => {
+                    let i = match self.collator.bisect_right(bounds, key) {
+                        0 => return Ok(Delete::None),
+                        i => i - 1,
+                    };
+
+                    let node = self.dir.write_file_owned(&children[i]).await?;
+                    match self.delete_inner(node, key).await? {
+                        Delete::None => return Ok(Delete::None),
+                        Delete::Right => return Ok(Delete::Right),
+                        Delete::Left(bound) => {
+                            bounds[i] = bound;
+
+                            return if i == 0 {
+                                Ok(Delete::Left(bounds[0].to_vec()))
+                            } else {
+                                Ok(Delete::Right)
+                            }
+                        }
+                        Delete::Underflow(mut node) => match &mut *node {
+                            Node::Leaf(new_keys) => {
+                                if i == 0 {
+                                    println!("merge leaf left");
+                                    match self.merge_leaf_left(new_keys, &children[i + 1]).await? {
+                                        MergeLeft::Borrow(bound) => {
+                                            bounds[i] = new_keys[0].to_vec();
+                                            bounds[i + 1] = bound;
+                                        }
+                                        MergeLeft::Merge(bound) => {
+                                            println!("delete child 0, new bound is {:?}", bound);
+                                            assert!(self.dir.delete(children[0].to_string()).await);
+                                            children.remove(0);
+                                            bounds.remove(0);
+                                            bounds[0] = bound;
+                                        }
+                                    }
+                                } else {
+                                    println!("merge leaf right");
+                                    match self.merge_leaf_right(new_keys, &children[i - 1]).await? {
+                                        MergeRight::Borrow => {
+                                            println!("bound {} is now {:?}", i, new_keys[0]);
+                                            bounds[i] = new_keys[0].to_vec();
+                                        }
+                                        MergeRight::Merge => {
+                                            println!("delete child {}", i);
+                                            self.dir.delete(children[i].to_string()).await;
+                                            children.remove(i);
+                                            bounds.remove(i);
+                                        }
+                                    }
+                                }
+                            }
+                            Node::Index(bounds, children) => {
+                                todo!()
+                            }
+                        },
+                    }
+
+                    if children.len() > (self.schema.order() / 2) {
+                        if i == 0 {
+                            Ok(Delete::Left(bounds[0].to_vec()))
+                        } else {
+                            Ok(Delete::Right)
+                        }
+                    } else {
+                        todo!()
+                    }
+                }
+            }
+        })
+    }
+
+    fn merge_leaf_left<'a>(
+        &'a self,
+        left_keys: &'a mut Vec<Key<S::Value>>,
+        node_id: &'a Uuid,
+    ) -> Pin<Box<dyn Future<Output = Result<MergeLeft<S::Value>, io::Error>> + 'a>> {
+        Box::pin(async move {
+            let mut node = self.dir.write_file(node_id).await?;
+
+            match &mut *node {
+                Node::Leaf(right_keys) => {
+                    if right_keys.len() > (self.schema.order() / 2) {
+                        left_keys.push(right_keys.remove(0));
+                        Ok(MergeLeft::Borrow(right_keys[0].to_vec()))
+                    } else {
+                        let mut new_keys = Vec::with_capacity(left_keys.len() + right_keys.len());
+                        new_keys.extend(left_keys.drain(..));
+                        new_keys.extend(right_keys.drain(..));
+                        *right_keys = new_keys;
+
+                        Ok(MergeLeft::Merge(right_keys[0].to_vec()))
+                    }
+                }
+                Node::Index(bounds, children) => {
+                    match self.merge_leaf_left(left_keys, &children[0]).await? {
+                        MergeLeft::Borrow(left) => {
+                            bounds[0] = left.to_vec();
+                            Ok(MergeLeft::Borrow(left))
+                        }
+                        MergeLeft::Merge(left) => {
+                            bounds[0] = left.to_vec();
+                            Ok(MergeLeft::Merge(left))
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    fn merge_leaf_right<'a>(
+        &'a self,
+        right_keys: &'a mut Vec<Key<S::Value>>,
+        node_id: &'a Uuid,
+    ) -> Pin<Box<dyn Future<Output = Result<MergeRight, io::Error>> + 'a>> {
+        Box::pin(async move {
+            let mut node = self.dir.write_file(node_id).await?;
+
+            match &mut *node {
+                Node::Leaf(left_keys) => {
+                    if left_keys.len() > (self.schema.order() / 2) {
+                        let right = left_keys.pop().expect("right");
+                        right_keys.insert(0, right);
+                        Ok(MergeRight::Borrow)
+                    } else {
+                        left_keys.extend(right_keys.drain(..));
+                        Ok(MergeRight::Merge)
+                    }
+                }
+                Node::Index(bounds, children) => {
+                    match self
+                        .merge_leaf_right(right_keys, children.last().expect("right"))
+                        .await?
+                    {
+                        MergeRight::Borrow => {
+                            todo!()
+                        }
+                        MergeRight::Merge => {
+                            todo!()
+                        }
+                    }
+                }
+            }
+        })
+    }
+
     /// Insert the given `key` into this B+ tree.
     pub async fn insert(&mut self, key: Key<S::Value>) -> Result<bool, S::Error> {
         let key = self.schema.validate(key)?;
