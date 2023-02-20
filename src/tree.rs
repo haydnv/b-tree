@@ -425,8 +425,13 @@ where
     pub fn into_stream(
         self,
         range: Range<S::Value>,
+        reverse: bool,
     ) -> impl Stream<Item = Result<Key<S::Value>, io::Error>> + Sized {
-        into_stream(Arc::new(self.dir), self.collator, Arc::new(range), ROOT)
+        if reverse {
+            into_stream_reverse(Arc::new(self.dir), self.collator, Arc::new(range), ROOT)
+        } else {
+            into_stream_forward(Arc::new(self.dir), self.collator, Arc::new(range), ROOT)
+        }
     }
 
     #[cfg(debug_assertions)]
@@ -512,7 +517,7 @@ where
     }
 }
 
-fn into_stream<C, V, FE, G>(
+fn into_stream_forward<C, V, FE, G>(
     dir: Arc<G>,
     collator: Arc<C>,
     range: Arc<Range<V>>,
@@ -550,7 +555,7 @@ where
             Node::Index(_bounds, children) if *range == Range::default() => {
                 let keys = stream::iter(children.to_vec())
                     .map(move |node_id| {
-                        into_stream(dir.clone(), collator.clone(), range.clone(), node_id)
+                        into_stream_forward(dir.clone(), collator.clone(), range.clone(), node_id)
                     })
                     .flatten();
 
@@ -564,20 +569,25 @@ where
                     let empty: IntoStream<V> = Box::pin(stream::empty());
                     return empty;
                 } else if l == children.len() {
-                    into_stream(dir, collator, range, children[l - 1])
+                    into_stream_forward(dir, collator, range, children[l - 1])
                 } else if l == r || l + 1 == r {
-                    into_stream(dir, collator, range, children[l])
+                    into_stream_forward(dir, collator, range, children[l])
                 } else {
-                    let left =
-                        into_stream(dir.clone(), collator.clone(), range.clone(), children[l]);
+                    let left = into_stream_forward(
+                        dir.clone(),
+                        collator.clone(),
+                        range.clone(),
+                        children[l],
+                    );
 
-                    let right = into_stream(dir.clone(), collator.clone(), range, children[r - 1]);
+                    let right =
+                        into_stream_forward(dir.clone(), collator.clone(), range, children[r - 1]);
 
                     let default_range = Arc::new(Range::default());
 
                     let middle = stream::iter(children[(l + 1)..(r - 1)].to_vec())
                         .map(move |node_id| {
-                            into_stream(
+                            into_stream_forward(
                                 dir.clone(),
                                 collator.clone(),
                                 default_range.clone(),
@@ -587,6 +597,103 @@ where
                         .flatten();
 
                     Box::pin(left.chain(middle).chain(right))
+                }
+            }
+        };
+
+        keys
+    });
+
+    Box::pin(stream::once(fut).try_flatten())
+}
+
+fn into_stream_reverse<C, V, FE, G>(
+    dir: Arc<G>,
+    collator: Arc<C>,
+    range: Arc<Range<V>>,
+    node_id: Uuid,
+) -> IntoStream<V>
+where
+    C: Collate<Value = V> + 'static,
+    V: Clone + PartialEq + fmt::Debug + 'static,
+    FE: FileLoad + AsType<Node<V>>,
+    G: Deref<Target = Dir<FE>> + 'static,
+{
+    let file = dir.get_file(&node_id).expect("node").clone();
+    let fut = file.into_read().map_ok(move |node| {
+        let keys: IntoStream<V> = match &*node {
+            Node::Leaf(keys) if *range == Range::default() => {
+                let keys = keys.iter().rev().cloned().collect::<Vec<_>>();
+                Box::pin(stream::iter(keys.into_iter().map(Ok)))
+            }
+            Node::Leaf(keys) => {
+                let (l, r) = collator.bisect(&keys, &range);
+
+                if l == keys.len() || r == 0 {
+                    Box::pin(stream::empty())
+                } else if l == r {
+                    let cmp = collator.compare_range(&keys[l], &*range);
+                    if cmp == Ordering::Equal {
+                        Box::pin(stream::once(future::ready(Ok(keys[l].to_vec()))))
+                    } else {
+                        Box::pin(stream::empty())
+                    }
+                } else {
+                    let keys = keys[l..r].iter().rev().cloned().collect::<Vec<_>>();
+                    Box::pin(stream::iter(keys.into_iter().map(Ok)))
+                }
+            }
+            Node::Index(_bounds, children) if *range == Range::default() => {
+                let children = children.iter().rev().copied().collect::<Vec<_>>();
+                let keys = stream::iter(children)
+                    .map(move |node_id| {
+                        into_stream_reverse(dir.clone(), collator.clone(), range.clone(), node_id)
+                    })
+                    .flatten();
+
+                Box::pin(keys)
+            }
+            Node::Index(bounds, children) => {
+                let (l, r) = collator.bisect(&bounds, &range);
+                let l = if l == 0 { l } else { l - 1 };
+
+                if r == 0 {
+                    let empty: IntoStream<V> = Box::pin(stream::empty());
+                    return empty;
+                } else if l == children.len() {
+                    into_stream_reverse(dir, collator, range, children[l - 1])
+                } else if l == r || l + 1 == r {
+                    into_stream_reverse(dir, collator, range, children[l])
+                } else {
+                    let left = into_stream_reverse(
+                        dir.clone(),
+                        collator.clone(),
+                        range.clone(),
+                        children[l],
+                    );
+
+                    let right =
+                        into_stream_reverse(dir.clone(), collator.clone(), range, children[r - 1]);
+
+                    let default_range = Arc::new(Range::default());
+
+                    let middle_children = children[(l + 1)..(r - 1)]
+                        .iter()
+                        .rev()
+                        .copied()
+                        .collect::<Vec<_>>();
+                    let middle = stream::iter(middle_children)
+                        .map(move |node_id| {
+                            into_stream_reverse(
+                                dir.clone(),
+                                collator.clone(),
+                                default_range.clone(),
+                                node_id,
+                            )
+                        })
+                        .flatten();
+
+                    Box::pin(right.chain(middle).chain(left))
                 }
             }
         };
@@ -1237,7 +1344,7 @@ where
             .into());
         }
 
-        let mut keys = other.into_stream(Range::default());
+        let mut keys = other.into_stream(Range::default(), false);
         while let Some(key) = keys.try_next().await? {
             self.insert_root(key).await?;
         }

@@ -231,14 +231,14 @@ async fn functional_test() -> Result<(), io::Error> {
         }
 
         let mut i = 1;
-        let mut keys = view.into_stream(Range::new(vec![], 0..123));
+        let mut keys = view.into_stream(Range::new(vec![], 0..123), false);
         while let Some(key) = keys.try_next().await? {
             assert_eq!(key[0], i);
             i += 1;
         }
 
         let view = btree.read().await;
-        let mut keys = view.into_stream(Range::new(vec![], 123..n));
+        let mut keys = view.into_stream(Range::new(vec![], 123..n), false);
         while let Some(key) = keys.try_next().await? {
             assert_eq!(key[0], i);
             i += 1;
@@ -263,13 +263,22 @@ async fn functional_test() -> Result<(), io::Error> {
 
         std::mem::drop(view);
 
-        let mut view = btree.write().await;
+        let view = btree.write().await;
 
         for i in 1..n {
             let key = vec![i, i16::MAX - i, i16::MAX - 2 * i];
             assert!(view.contains(&key).await?);
         }
 
+        let mut i = n - 1;
+        let mut reversed = view.into_stream(Range::default(), true);
+        while let Some(key) = reversed.try_next().await? {
+            assert_eq!(key[0], i);
+            i -= 1;
+        }
+        assert_eq!(i, 0);
+
+        let mut view = btree.write().await;
         let mut count = view.count(&Range::default()).await?;
         assert_eq!(count, (n - 1) as u64);
         assert!(!view.is_empty(&Range::default()).await?);
@@ -295,7 +304,7 @@ async fn functional_test() -> Result<(), io::Error> {
             assert_eq!(view.count(&Range::default()).await?, count);
         }
 
-        assert_eq!(view.into_stream(Range::default()).try_next().await?, None);
+        assert_eq!(view.into_stream(Range::default(), false).try_next().await?, None);
     }
 
     // clean up
