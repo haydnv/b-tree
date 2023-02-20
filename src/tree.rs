@@ -641,7 +641,6 @@ where
     /// Delete the given `key` from this B+Tree.
     pub async fn delete(&mut self, key: Key<S::Value>) -> Result<bool, S::Error> {
         let key = self.schema.validate(key)?;
-        println!("delete {:?}", key);
 
         let mut root = self.dir.write_file_owned(&ROOT).await?;
 
@@ -720,10 +719,8 @@ where
 
                     if i < keys.len() && &keys[i] == key {
                         keys.remove(i);
-                        println!("deleted key {:?} at {}", key, i);
 
                         if keys.len() < (self.schema.order() / 2) {
-                            println!("underflow");
                             Ok(Delete::Underflow(node))
                         } else if i == 0 {
                             Ok(Delete::Left(keys[0].clone()))
@@ -788,37 +785,30 @@ where
     ) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + 'a>> {
         Box::pin(async move {
             if i == 0 {
-                println!("merge index left");
                 match self
                     .merge_index_left(new_bounds, new_children, &children[i + 1])
                     .await?
                 {
                     MergeIndexLeft::Borrow(bound) => {
                         bounds[i] = new_bounds[0].to_vec();
-                        println!("bound {} is now {:?}", i, bounds[i]);
-                        println!("bound {} is now {:?}", i + 1, bounds[i + 1]);
                         bounds[i + 1] = bound;
                     }
                     MergeIndexLeft::Merge(bound) => {
-                        println!("delete child 0, new bound is {:?}", bound);
-                        assert!(self.dir.delete(children[0].to_string()).await);
+                        self.dir.delete(children[0].to_string()).await;
                         children.remove(0);
                         bounds.remove(0);
                         bounds[0] = bound;
                     }
                 }
             } else {
-                println!("merge index right");
                 match self
                     .merge_index_right(new_bounds, new_children, &children[i - 1])
                     .await?
                 {
                     MergeIndexRight::Borrow => {
                         bounds[i] = new_bounds[0].to_vec();
-                        println!("bound {} is now {:?}", i, new_bounds[0]);
                     }
                     MergeIndexRight::Merge => {
-                        println!("delete child {}", i);
                         self.dir.delete(children[i].to_string()).await;
                         children.remove(i);
                         bounds.remove(i);
@@ -906,29 +896,24 @@ where
     ) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + 'a>> {
         Box::pin(async move {
             if i == 0 {
-                println!("merge leaf left");
                 match self.merge_leaf_left(new_keys, &children[i + 1]).await? {
                     MergeLeafLeft::Borrow(bound) => {
                         bounds[i] = new_keys[0].to_vec();
                         bounds[i + 1] = bound;
                     }
                     MergeLeafLeft::Merge(bound) => {
-                        println!("delete child 0, new bound is {:?}", bound);
-                        assert!(self.dir.delete(children[0].to_string()).await);
+                        self.dir.delete(children[0].to_string()).await;
                         children.remove(0);
                         bounds.remove(0);
                         bounds[0] = bound;
                     }
                 }
             } else {
-                println!("merge leaf right");
                 match self.merge_leaf_right(new_keys, &children[i - 1]).await? {
                     MergeLeafRight::Borrow => {
-                        println!("bound {} is now {:?}", i, new_keys[0]);
                         bounds[i] = new_keys[0].to_vec();
                     }
                     MergeLeafRight::Merge => {
-                        println!("delete child {}", i);
                         self.dir.delete(children[i].to_string()).await;
                         children.remove(i);
                         bounds.remove(i);
