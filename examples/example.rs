@@ -304,7 +304,10 @@ async fn functional_test() -> Result<(), io::Error> {
             assert_eq!(view.count(&Range::default()).await?, count);
         }
 
-        assert_eq!(view.into_stream(Range::default(), false).try_next().await?, None);
+        assert_eq!(
+            view.into_stream(Range::default(), false).try_next().await?,
+            None
+        );
     }
 
     // clean up

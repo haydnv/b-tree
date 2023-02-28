@@ -5,7 +5,10 @@ use std::string::ToString;
 use std::sync::Arc;
 use std::{fmt, io};
 
-use freqfs::*;
+use freqfs::{
+    Dir, DirLock, DirReadGuardOwned, DirWriteGuardOwned, FileLoad, FileReadGuard,
+    FileReadGuardOwned, FileWriteGuardOwned,
+};
 use futures::future::{self, Future, FutureExt};
 use futures::stream::{self, Stream, StreamExt, TryStreamExt};
 use futures::try_join;
