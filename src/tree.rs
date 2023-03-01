@@ -5,6 +5,7 @@ use std::string::ToString;
 use std::sync::Arc;
 use std::{fmt, io};
 
+use collate::Collate;
 use freqfs::{
     Dir, DirLock, DirReadGuardOwned, DirWriteGuardOwned, FileLoad, FileReadGuard,
     FileReadGuardOwned, FileWriteGuardOwned,
@@ -16,17 +17,14 @@ use futures::TryFutureExt;
 use safecast::AsType;
 use uuid::Uuid;
 
-use super::collate::{Collate, CollateRange};
 use super::range::Range;
-use super::Schema;
+use super::{Collator, Key, Schema};
 
 /// A read guard acquired on a [`BTreeLock`]
 pub type BTreeReadGuard<S, C, FE> = BTree<S, C, DirReadGuardOwned<FE>>;
 
 /// A write guard acquired on a [`BTreeLock`]
 pub type BTreeWriteGuard<S, C, FE> = BTree<S, C, DirWriteGuardOwned<FE>>;
-
-type Key<V> = Vec<V>;
 
 const ROOT: Uuid = Uuid::from_fields(0, 0, 0, &[0u8; 8]);
 
@@ -73,10 +71,10 @@ impl<V: fmt::Debug> fmt::Debug for Node<V> {
     }
 }
 
-/// A lock to synchronize access to a persistent B+Tree
+/// A futures-aware read-write lock on a [`BTree`]
 pub struct BTreeLock<S, C, FE> {
     schema: Arc<S>,
-    collator: Arc<C>,
+    collator: Arc<Collator<C>>,
     dir: DirLock<FE>,
 }
 
@@ -105,7 +103,7 @@ where
     fn new(schema: S, collator: C, dir: DirLock<FE>) -> Self {
         Self {
             schema: Arc::new(schema),
-            collator: Arc::new(collator),
+            collator: Arc::new(Collator::new(collator)),
             dir,
         }
     }
@@ -177,10 +175,10 @@ type ToStream<'a, FE, V> =
     Pin<Box<dyn Stream<Item = Result<FileReadGuardOwned<FE, [Key<V>]>, io::Error>> + 'a>>;
 
 /// A B+Tree
-pub struct BTree<S, C, D> {
+pub struct BTree<S, C, G> {
     schema: Arc<S>,
-    collator: Arc<C>,
-    dir: D,
+    collator: Arc<Collator<C>>,
+    dir: G,
 }
 
 impl<S, C, FE, G> BTree<S, C, G>
