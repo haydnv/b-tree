@@ -520,7 +520,7 @@ where
 
 fn into_stream_forward<C, V, FE, G>(
     dir: Arc<G>,
-    collator: Arc<C>,
+    collator: Arc<Collator<C>>,
     range: Arc<Range<V>>,
     node_id: Uuid,
 ) -> IntoStream<V>
@@ -610,7 +610,7 @@ where
 
 fn into_stream_reverse<C, V, FE, G>(
     dir: Arc<G>,
-    collator: Arc<C>,
+    collator: Arc<Collator<C>>,
     range: Arc<Range<V>>,
     node_id: Uuid,
 ) -> IntoStream<V>

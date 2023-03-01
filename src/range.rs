@@ -8,13 +8,13 @@ use super::{Collator, Key};
 
 /// A range used to select a slice of a `BTree`
 #[derive(Clone, Eq, PartialEq)]
-pub struct Range<K> {
-    prefix: Vec<K>,
-    start: Bound<K>,
-    end: Bound<K>,
+pub struct Range<V> {
+    prefix: Key<V>,
+    start: Bound<V>,
+    end: Bound<V>,
 }
 
-impl<K> Default for Range<K> {
+impl<V> Default for Range<V> {
     fn default() -> Self {
         Self {
             prefix: vec![],
@@ -23,9 +23,10 @@ impl<K> Default for Range<K> {
         }
     }
 }
-impl<K: PartialEq> Range<K> {
+
+impl<V: PartialEq> Range<V> {
     /// Construct a new [`Range`] with the given `prefix`.
-    pub fn new(prefix: Vec<K>, range: Bounds<K>) -> Self {
+    pub fn new(prefix: Vec<V>, range: Bounds<V>) -> Self {
         let Bounds { start, end } = range;
 
         Self {
@@ -36,7 +37,7 @@ impl<K: PartialEq> Range<K> {
     }
 
     /// Construct a new [`Range`] with only the given `prefix`.
-    pub fn with_prefix(prefix: Vec<K>) -> Self {
+    pub fn with_prefix(prefix: Vec<V>) -> Self {
         Self {
             prefix,
             start: Bound::Unbounded,
@@ -44,118 +45,43 @@ impl<K: PartialEq> Range<K> {
         }
     }
 
-    // /// Return `true` if the `other` [`Range`] lies entirely within this one.
-    // pub fn contains<C: Collate<Value = K>>(&self, other: &Self, collator: &C) -> bool {
-    //     if other.prefix.len() < self.prefix.len() {
-    //         return false;
+    // /// Return `true` if this [`Range`] is has only a prefix.
+    // pub fn has_bounds(&self) -> bool {
+    //     match (&self.start, &self.end) {
+    //         (Bound::Unbounded, Bound::Unbounded) => false,
+    //         _ => true,
     //     }
-    //
-    //     if &other.prefix[..self.prefix.len()] != &self.prefix[..] {
-    //         return false;
-    //     }
-    //
-    //     if other.prefix.len() == self.prefix.len() {
-    //         match &self.start {
-    //             Bound::Unbounded => {}
-    //             Bound::Included(outer) => match &other.start {
-    //                 Bound::Unbounded => return false,
-    //                 Bound::Included(inner) => {
-    //                     if collator.compare(inner, outer) == Less {
-    //                         return false;
-    //                     }
-    //                 }
-    //                 Bound::Excluded(inner) => {
-    //                     if collator.compare(inner, outer) != Greater {
-    //                         return false;
-    //                     }
-    //                 }
-    //             },
-    //             Bound::Excluded(outer) => match &other.start {
-    //                 Bound::Unbounded => return false,
-    //                 Bound::Included(inner) => {
-    //                     if collator.compare(inner, outer) != Greater {
-    //                         return false;
-    //                     }
-    //                 }
-    //                 Bound::Excluded(inner) => {
-    //                     if collator.compare(inner, outer) == Less {
-    //                         return false;
-    //                     }
-    //                 }
-    //             },
-    //         }
-    //     } else {
-    //         let value = &other.prefix[self.prefix.len()];
-    //
-    //         match &self.start {
-    //             Bound::Unbounded => {}
-    //             Bound::Included(outer) => {
-    //                 if collator.compare(value, outer) == Less {
-    //                     return false;
-    //                 }
-    //             }
-    //             Bound::Excluded(outer) => {
-    //                 if collator.compare(value, outer) != Greater {
-    //                     return false;
-    //                 }
-    //             }
-    //         }
-    //
-    //         match &self.end {
-    //             Bound::Unbounded => {}
-    //             Bound::Included(outer) => {
-    //                 if collator.compare(value, outer) == Greater {
-    //                     return false;
-    //                 }
-    //             }
-    //             Bound::Excluded(outer) => {
-    //                 if collator.compare(value, outer) != Less {
-    //                     return false;
-    //                 }
-    //             }
-    //         }
-    //     }
-    //
-    //     true
     // }
-
-    /// Return `true` if this [`Range`] is has only a prefix.
-    pub fn has_bounds(&self) -> bool {
-        match (&self.start, &self.end) {
-            (Bound::Unbounded, Bound::Unbounded) => false,
-            _ => true,
-        }
-    }
-
-    /// Deconstruct this [`Range`] into its prefix and its start and end [`Bound`]s.
-    pub fn into_inner(self) -> (Vec<K>, (Bound<K>, Bound<K>)) {
-        (self.prefix, (self.start, self.end))
-    }
-
-    /// Return the length of this [`Range`].
-    pub fn len(&self) -> usize {
-        let len = self.prefix().len();
-        if self.has_bounds() {
-            len + 1
-        } else {
-            len
-        }
-    }
-
-    /// Borrow the prefix of this [`Range`].
-    pub fn prefix(&self) -> &[K] {
-        &self.prefix
-    }
-
-    /// Borrow the starting [`Bound`] of the last item in this range.
-    pub fn start(&self) -> &Bound<K> {
-        &self.start
-    }
-
-    /// Borrow the ending [`Bound`] of the last item in this range.
-    pub fn end(&self) -> &Bound<K> {
-        &self.end
-    }
+    //
+    // /// Deconstruct this [`Range`] into its prefix and its start and end [`Bound`]s.
+    // pub fn into_inner(self) -> (Vec<V>, (Bound<V>, Bound<V>)) {
+    //     (self.prefix, (self.start, self.end))
+    // }
+    //
+    // /// Return the length of this [`Range`].
+    // pub fn len(&self) -> usize {
+    //     let len = self.prefix().len();
+    //     if self.has_bounds() {
+    //         len + 1
+    //     } else {
+    //         len
+    //     }
+    // }
+    //
+    // /// Borrow the prefix of this [`Range`].
+    // pub fn prefix(&self) -> &[V] {
+    //     &self.prefix
+    // }
+    //
+    // /// Borrow the starting [`Bound`] of the last item in this range.
+    // pub fn start(&self) -> &Bound<V> {
+    //     &self.start
+    // }
+    //
+    // /// Borrow the ending [`Bound`] of the last item in this range.
+    // pub fn end(&self) -> &Bound<V> {
+    //     &self.end
+    // }
 }
 
 impl<C: Collate> Overlaps<Key<C::Value>, Collator<C>> for Range<C::Value> {
@@ -194,27 +120,91 @@ impl<C: Collate> Overlaps<Key<C::Value>, Collator<C>> for Range<C::Value> {
                         debug_assert_eq!(end, Ordering::Greater);
                         Overlap::Greater
                     }
-                    (Ordering::Equal, Ordering::Equal) => {
-                        if key.len() == self.prefix.len() + 1 {
-                            Overlap::Equal
-                        } else {
-                            Overlap::Wide
-                        }
+                    (Ordering::Equal, Ordering::Equal) if key.len() == self.prefix.len() + 1 => {
+                        // in this case, the range prefix of length n is exactly equal to key[0..n]
+                        // and the trailing range is exactly equal to key[n]
+                        Overlap::Equal
                     }
-                    (Ordering::Less, Ordering::Greater)
-                    | (Ordering::Equal, Ordering::Greater)
-                    | (Ordering::Less, Ordering::Equal) => Overlap::Wide,
+                    _ => Overlap::Wide,
                 }
             }
         }
     }
 }
 
-impl<P, K> From<(P, Bounds<K>)> for Range<K>
-where
-    Vec<K>: From<P>,
-{
-    fn from(tuple: (P, Bounds<K>)) -> Self {
+impl<C: Collate> Overlaps<Range<C::Value>, Collator<C>> for Range<C::Value> {
+    fn overlaps(&self, other: &Range<C::Value>, collator: &Collator<C>) -> Overlap {
+        #[inline]
+        fn cmp_start<C>(collator: &C, bound: &Bound<C::Value>, value: &C::Value) -> Ordering
+        where
+            C: Collate,
+        {
+            match bound {
+                Bound::Unbounded => Ordering::Less,
+                Bound::Included(start) => collator.cmp(start, value),
+                Bound::Excluded(start) => match collator.cmp(start, value) {
+                    Ordering::Less | Ordering::Equal => Ordering::Less,
+                    Ordering::Greater => Ordering::Greater,
+                },
+            }
+        }
+
+        #[inline]
+        fn cmp_end<C>(collator: &C, bound: &Bound<C::Value>, value: &C::Value) -> Ordering
+        where
+            C: Collate,
+        {
+            match bound {
+                Bound::Unbounded => Ordering::Less,
+                Bound::Included(end) => collator.cmp(end, value),
+                Bound::Excluded(end) => match collator.cmp(end, value) {
+                    Ordering::Less => Ordering::Less,
+                    Ordering::Greater | Ordering::Equal => Ordering::Greater,
+                },
+            }
+        }
+
+        match collator.cmp(&self.prefix, &other.prefix) {
+            Ordering::Less => return Overlap::Less,
+            Ordering::Greater => return Overlap::Greater,
+            Ordering::Equal => match self.prefix.len().cmp(&other.prefix.len()) {
+                Ordering::Less => {
+                    let value = &other.prefix[self.prefix.len()];
+
+                    match (
+                        cmp_start(&collator.value, &self.start, value),
+                        cmp_end(&collator.value, &self.end, value),
+                    ) {
+                        (Ordering::Greater, _) => Overlap::Greater,
+                        (_, Ordering::Less) => Overlap::Less,
+
+                        (Ordering::Equal, Ordering::Greater) => Overlap::WideGreater,
+                        (Ordering::Less, Ordering::Equal) => Overlap::WideLess,
+
+                        (Ordering::Less, Ordering::Greater) => Overlap::Wide,
+                        (Ordering::Equal, Ordering::Equal) => Overlap::Wide,
+                    }
+                }
+                Ordering::Equal => (&self.start, &self.end).overlaps(&(&other.start, &other.end)),
+                Ordering::Greater => {
+                    let value = &self.prefix[other.prefix.len()];
+
+                    match (
+                        cmp_start(&collator.value, &other.start, value),
+                        cmp_end(&collator.value, &other.end, value),
+                    ) {
+                        (Ordering::Greater, _) => Overlap::Less,
+                        (_, Ordering::Less) => Overlap::Greater,
+                        _ => Overlap::Narrow,
+                    }
+                }
+            },
+        }
+    }
+}
+
+impl<V, K: Into<Key<V>>> From<(K, Bounds<V>)> for Range<V> {
+    fn from(tuple: (K, Bounds<V>)) -> Self {
         let (prefix, suffix) = tuple;
         let Bounds { start, end } = suffix;
 
