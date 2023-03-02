@@ -7,11 +7,13 @@ use std::{fmt, io};
 
 use collate::Collate;
 
+mod node;
 mod range;
 mod tree;
 
+pub use node::{Block, Node};
 pub use range::Range;
-pub use tree::{BTree, BTreeLock, BTreeReadGuard, BTreeWriteGuard, Node};
+pub use tree::{BTree, BTreeLock, BTreeReadGuard, BTreeWriteGuard};
 
 /// A key in a B+Tree
 pub type Key<V> = Vec<V>;

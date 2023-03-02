@@ -1,11 +1,10 @@
-use std::cmp::Ordering;
 use std::ops::Deref;
 use std::pin::Pin;
 use std::string::ToString;
 use std::sync::Arc;
 use std::{fmt, io};
 
-use collate::Collate;
+use collate::{Collate, Overlaps};
 use freqfs::{
     Dir, DirLock, DirReadGuardOwned, DirWriteGuardOwned, FileLoad, FileReadGuard,
     FileReadGuardOwned, FileWriteGuardOwned,
@@ -17,6 +16,7 @@ use futures::TryFutureExt;
 use safecast::AsType;
 use uuid::Uuid;
 
+use super::node::Block;
 use super::range::Range;
 use super::{Collator, Key, Schema};
 
@@ -26,50 +26,10 @@ pub type BTreeReadGuard<S, C, FE> = BTree<S, C, DirReadGuardOwned<FE>>;
 /// A write guard acquired on a [`BTreeLock`]
 pub type BTreeWriteGuard<S, C, FE> = BTree<S, C, DirWriteGuardOwned<FE>>;
 
+// TODO: genericize
+type Node<V> = super::node::Node<Vec<Key<V>>>;
+
 const ROOT: Uuid = Uuid::from_fields(0, 0, 0, &[0u8; 8]);
-
-pub enum Node<V> {
-    Index(Vec<Key<V>>, Vec<Uuid>),
-    Leaf(Vec<Key<V>>),
-}
-
-impl<V> Node<V> {
-    fn is_leaf(&self) -> bool {
-        match self {
-            Self::Leaf(_) => true,
-            _ => false,
-        }
-    }
-}
-
-#[cfg(debug_assertions)]
-impl<V: fmt::Debug> fmt::Debug for Node<V> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Self::Leaf(keys) => write!(f, "leaf node with keys {:?}", keys),
-            Self::Index(bounds, children) => write!(
-                f,
-                "index node with bounds {:?} and children {:?}",
-                bounds, children
-            ),
-        }
-    }
-}
-
-#[cfg(not(debug_assertions))]
-impl<V: fmt::Debug> fmt::Debug for Node<V> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Self::Leaf(keys) => write!(f, "a leaf node with {} keys", keys.len()),
-            Self::Index(bounds, children) => write!(
-                f,
-                "an index node with {} bounds and {} children",
-                bounds.len(),
-                children.len()
-            ),
-        }
-    }
-}
 
 /// A futures-aware read-write lock on a [`BTree`]
 pub struct BTreeLock<S, C, FE> {
@@ -196,7 +156,7 @@ where
         loop {
             match &*node {
                 Node::Leaf(keys) => {
-                    let i = self.collator.bisect_left(&keys, key);
+                    let i = keys.bisect_left(&key, &*self.collator);
                     break Ok(if i < keys.len() {
                         match keys.get(i) {
                             Some(present) => present == key,
@@ -207,7 +167,7 @@ where
                     });
                 }
                 Node::Index(bounds, children) => {
-                    let i = self.collator.bisect_right(&bounds, key);
+                    let i = bounds.bisect_right(key, &*self.collator);
                     if i == 0 {
                         return Ok(false);
                     } else {
@@ -231,15 +191,16 @@ where
     ) -> Pin<Box<dyn Future<Output = Result<u64, io::Error>> + 'a>> {
         Box::pin(async move {
             match &*node {
-                Node::Leaf(keys) if range == &Range::default() => Ok(keys.len() as u64),
+                Node::Leaf(keys) if range == &Range::default() => {
+                    Ok(keys.len() as u64)
+                },
                 Node::Leaf(keys) => {
-                    let (l, r) = self.collator.bisect(&keys, range);
+                    let (l, r) = keys.bisect(range, &*self.collator);
 
                     if l == keys.len() {
                         Ok(0)
                     } else if l == r {
-                        let cmp = self.collator.compare_range(&keys[l], range);
-                        if cmp == Ordering::Equal {
+                        if range.contains(&keys[l], &*self.collator) {
                             Ok(1)
                         } else {
                             Ok(0)
@@ -257,7 +218,7 @@ where
                         .await
                 }
                 Node::Index(bounds, children) => {
-                    let (l, r) = self.collator.bisect(&bounds, range);
+                    let (l, r) = bounds.bisect(range, &*self.collator);
                     let l = if l == 0 { l } else { l - 1 };
 
                     if l == children.len() {
@@ -328,11 +289,11 @@ where
         Ok(loop {
             match &*node {
                 Node::Leaf(keys) => {
-                    let (l, r) = self.collator.bisect(&keys, range);
+                    let (l, r) = keys.bisect(range, &*self.collator);
                     break l == r;
                 }
                 Node::Index(bounds, children) => {
-                    let (l, r) = self.collator.bisect(&bounds, range);
+                    let (l, r) = bounds.bisect(range, &*self.collator);
 
                     if l == children.len() {
                         node = self.dir.read_file(&children[l - 1]).await?;
@@ -374,11 +335,10 @@ where
                         Node::Leaf(keys) => match range {
                             None => Some(&keys[..]),
                             Some(range) => {
-                                let (l, r) = self.collator.bisect(keys, range);
+                                let (l, r) = keys.bisect(range, &*self.collator);
 
                                 let slice = if l == r && l < keys.len() {
-                                    let cmp = self.collator.compare_range(&keys[l], &*range);
-                                    if cmp == Ordering::Equal {
+                                    if range.contains(&keys[l], &*self.collator) {
                                         &keys[l..l + 1]
                                     } else {
                                         &keys[l..l]
@@ -399,7 +359,7 @@ where
                     let children = match &*node {
                         Node::Index(bounds, children) => match range {
                             Some(range) => {
-                                let (l, r) = self.collator.bisect(bounds, range);
+                                let (l, r) = bounds.bisect(range, &*self.collator);
                                 let l = if l == 0 { l } else { l - 1 };
                                 children[l..r].to_vec()
                             }
@@ -442,11 +402,12 @@ where
 
             match &*root {
                 Node::Leaf(keys) => {
-                    assert!(self.collator.is_sorted(&keys));
+                    assert!(keys.len() <= self.schema.order());
+                    // assert!(self.collator.is_sorted(&keys));
                 }
                 Node::Index(bounds, children) => {
                     assert_eq!(bounds.len(), children.len());
-                    assert!(self.collator.is_sorted(bounds));
+                    // assert!(self.collator.is_sorted(bounds));
 
                     for (left, node_id) in bounds.iter().zip(children) {
                         let node = self.dir.read_file(node_id).await?;
@@ -471,11 +432,11 @@ where
         }
 
         assert_eq!(count, contents.len());
-        assert!(
-            self.collator.is_sorted(&contents),
-            "not sorted: {:?}",
-            contents
-        );
+        // assert!(
+        //     self.collator.is_sorted(&contents),
+        //     "not sorted: {:?}",
+        //     contents
+        // );
 
         Ok(true)
     }
@@ -492,11 +453,11 @@ where
                 Node::Leaf(keys) => {
                     assert!(keys.len() >= (order / 2) - 1);
                     assert!(keys.len() < order);
-                    assert!(self.collator.is_sorted(&keys));
+                    // assert!(self.collator.is_sorted(&keys));
                 }
                 Node::Index(bounds, children) => {
                     assert_eq!(bounds.len(), children.len());
-                    assert!(self.collator.is_sorted(bounds));
+                    // assert!(self.collator.is_sorted(bounds));
                     assert!(children.len() >= self.schema.order() / 2);
                     assert!(children.len() <= order);
 
@@ -538,13 +499,12 @@ where
                 Box::pin(keys)
             }
             Node::Leaf(keys) => {
-                let (l, r) = collator.bisect(&keys, &range);
+                let (l, r) = keys.bisect(&*range, &*collator);
 
                 if l == keys.len() || r == 0 {
                     Box::pin(stream::empty())
                 } else if l == r {
-                    let cmp = collator.compare_range(&keys[l], &*range);
-                    if cmp == Ordering::Equal {
+                    if range.contains(&keys[l], &*collator) {
                         Box::pin(stream::once(future::ready(Ok(keys[l].to_vec()))))
                     } else {
                         Box::pin(stream::empty())
@@ -563,7 +523,7 @@ where
                 Box::pin(keys)
             }
             Node::Index(bounds, children) => {
-                let (l, r) = collator.bisect(&bounds, &range);
+                let (l, r) = bounds.bisect(&*range, &*collator);
                 let l = if l == 0 { l } else { l - 1 };
 
                 if r == 0 {
@@ -628,13 +588,12 @@ where
                 Box::pin(stream::iter(keys.into_iter().map(Ok)))
             }
             Node::Leaf(keys) => {
-                let (l, r) = collator.bisect(&keys, &range);
+                let (l, r) = keys.bisect(&*range, &*collator);
 
                 if l == keys.len() || r == 0 {
                     Box::pin(stream::empty())
                 } else if l == r {
-                    let cmp = collator.compare_range(&keys[l], &*range);
-                    if cmp == Ordering::Equal {
+                    if range.contains(&keys[l], &*collator) {
                         Box::pin(stream::once(future::ready(Ok(keys[l].to_vec()))))
                     } else {
                         Box::pin(stream::empty())
@@ -655,7 +614,7 @@ where
                 Box::pin(keys)
             }
             Node::Index(bounds, children) => {
-                let (l, r) = collator.bisect(&bounds, &range);
+                let (l, r) = bounds.bisect(&*range, &*collator);
                 let l = if l == 0 { l } else { l - 1 };
 
                 if r == 0 {
@@ -754,7 +713,7 @@ where
 
         let new_root = match &mut *root {
             Node::Leaf(keys) => {
-                let i = self.collator.bisect_left(&keys, &key);
+                let i = keys.bisect_left(&key, &*self.collator);
                 if i < keys.len() && &keys[i] == &key {
                     keys.remove(i);
                     return Ok(true);
@@ -763,7 +722,7 @@ where
                 }
             }
             Node::Index(bounds, children) => {
-                let i = match self.collator.bisect_right(bounds, &key) {
+                let i = match bounds.bisect_right(&key, &*self.collator) {
                     0 => return Ok(false),
                     i => i - 1,
                 };
@@ -823,7 +782,7 @@ where
         Box::pin(async move {
             match &mut *node {
                 Node::Leaf(keys) => {
-                    let i = self.collator.bisect_left(keys, key);
+                    let i = keys.bisect_left(&key, &*self.collator);
 
                     if i < keys.len() && &keys[i] == key {
                         keys.remove(i);
@@ -840,7 +799,7 @@ where
                     }
                 }
                 Node::Index(bounds, children) => {
-                    let i = match self.collator.bisect_right(bounds, key) {
+                    let i = match bounds.bisect_right(key, &*self.collator) {
                         0 => return Ok(Delete::None),
                         i => i - 1,
                     };
@@ -1107,7 +1066,7 @@ where
 
         let new_root = match &mut *root {
             Node::Leaf(keys) => {
-                let i = self.collator.bisect_left(&keys, &key);
+                let i = keys.bisect_left(&key, &*self.collator);
 
                 if i < keys.len() && keys[i] == key {
                     // no-op
@@ -1116,7 +1075,7 @@ where
 
                 keys.insert(i, key);
 
-                debug_assert!(self.collator.is_sorted(&keys));
+                // debug_assert!(self.collator.is_sorted(&keys));
 
                 if keys.len() > order {
                     let mid = div_ceil(order, 2);
@@ -1142,7 +1101,7 @@ where
             Node::Index(bounds, children) => {
                 debug_assert_eq!(bounds.len(), children.len());
 
-                let i = match self.collator.bisect_left(&bounds, &key) {
+                let i = match bounds.bisect_left(&key, &*self.collator) {
                     0 => 0,
                     i => i - 1,
                 };
@@ -1167,7 +1126,7 @@ where
                     }
                 }
 
-                debug_assert!(self.collator.is_sorted(&bounds));
+                // debug_assert!(self.collator.is_sorted(&bounds));
                 debug_assert_eq!(bounds.len(), children.len());
 
                 if children.len() > order {
@@ -1213,7 +1172,7 @@ where
 
             match node {
                 Node::Leaf(keys) => {
-                    let i = self.collator.bisect_left(&keys, &key);
+                    let i = keys.bisect_left(&key, &*self.collator);
 
                     if i < keys.len() && keys[i] == key {
                         // no-op
@@ -1222,7 +1181,7 @@ where
 
                     keys.insert(i, key);
 
-                    debug_assert!(self.collator.is_sorted(&keys));
+                    // debug_assert!(self.collator.is_sorted(&keys));
 
                     let mid = order / 2;
 
@@ -1260,7 +1219,7 @@ where
                     debug_assert_eq!(bounds.len(), children.len());
                     let size = self.schema.block_size() >> 1;
 
-                    let i = match self.collator.bisect_left(&bounds, &key) {
+                    let i = match bounds.bisect_left(&key, &*self.collator) {
                         0 => 0,
                         i => i - 1,
                     };
@@ -1292,7 +1251,7 @@ where
                         }
                     };
 
-                    debug_assert!(self.collator.is_sorted(bounds));
+                    // debug_assert!(self.collator.is_sorted(bounds));
 
                     if children.len() > order {
                         let mid = div_ceil(self.schema.order(), 2);

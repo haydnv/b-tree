@@ -24,7 +24,7 @@ impl<V> Default for Range<V> {
     }
 }
 
-impl<V: PartialEq> Range<V> {
+impl<V> Range<V> {
     /// Construct a new [`Range`] with the given `prefix`.
     pub fn new(prefix: Vec<V>, range: Bounds<V>) -> Self {
         let Bounds { start, end } = range;
@@ -37,7 +37,7 @@ impl<V: PartialEq> Range<V> {
     }
 
     /// Construct a new [`Range`] with only the given `prefix`.
-    pub fn with_prefix(prefix: Vec<V>) -> Self {
+    pub fn from_prefix(prefix: Vec<V>) -> Self {
         Self {
             prefix,
             start: Bound::Unbounded,
@@ -45,46 +45,20 @@ impl<V: PartialEq> Range<V> {
         }
     }
 
-    // /// Return `true` if this [`Range`] is has only a prefix.
-    // pub fn has_bounds(&self) -> bool {
-    //     match (&self.start, &self.end) {
-    //         (Bound::Unbounded, Bound::Unbounded) => false,
-    //         _ => true,
-    //     }
-    // }
-    //
-    // /// Deconstruct this [`Range`] into its prefix and its start and end [`Bound`]s.
-    // pub fn into_inner(self) -> (Vec<V>, (Bound<V>, Bound<V>)) {
-    //     (self.prefix, (self.start, self.end))
-    // }
-    //
-    // /// Return the length of this [`Range`].
-    // pub fn len(&self) -> usize {
-    //     let len = self.prefix().len();
-    //     if self.has_bounds() {
-    //         len + 1
-    //     } else {
-    //         len
-    //     }
-    // }
-    //
-    // /// Borrow the prefix of this [`Range`].
-    // pub fn prefix(&self) -> &[V] {
-    //     &self.prefix
-    // }
-    //
-    // /// Borrow the starting [`Bound`] of the last item in this range.
-    // pub fn start(&self) -> &Bound<V> {
-    //     &self.start
-    // }
-    //
-    // /// Borrow the ending [`Bound`] of the last item in this range.
-    // pub fn end(&self) -> &Bound<V> {
-    //     &self.end
-    // }
+    /// Return `true` if this [`Range`] is empty.
+    pub fn is_default(&self) -> bool {
+        if self.prefix.is_empty() {
+            match (&self.start, &self.end) {
+                (Bound::Unbounded, Bound::Unbounded) => true,
+                _ => false,
+            }
+        } else {
+            false
+        }
+    }
 }
 
-impl<C: Collate> Overlaps<Key<C::Value>, Collator<C>> for Range<C::Value> {
+impl<C: Collate> Overlaps<Key<C::Value>, Collator<C>> for Range<C::Value> where C::Value: fmt::Debug {
     fn overlaps(&self, key: &Key<C::Value>, collator: &Collator<C>) -> Overlap {
         match collator.cmp(&self.prefix, key) {
             Ordering::Less => Overlap::Less,
@@ -97,8 +71,8 @@ impl<C: Collate> Overlaps<Key<C::Value>, Collator<C>> for Range<C::Value> {
                     Bound::Unbounded => Ordering::Less,
                     Bound::Included(start) => collator.value.cmp(start, value),
                     Bound::Excluded(start) => match collator.value.cmp(start, value) {
-                        Ordering::Less | Ordering::Equal => Ordering::Less,
-                        Ordering::Greater => Ordering::Greater,
+                        Ordering::Less => Ordering::Less,
+                        Ordering::Greater | Ordering::Equal => Ordering::Greater,
                     },
                 };
 
@@ -106,8 +80,8 @@ impl<C: Collate> Overlaps<Key<C::Value>, Collator<C>> for Range<C::Value> {
                     Bound::Unbounded => Ordering::Greater,
                     Bound::Included(end) => collator.value.cmp(end, value),
                     Bound::Excluded(end) => match collator.value.cmp(end, value) {
-                        Ordering::Greater | Ordering::Equal => Ordering::Greater,
-                        Ordering::Less => Ordering::Less,
+                        Ordering::Greater => Ordering::Greater,
+                        Ordering::Less | Ordering::Equal => Ordering::Less,
                     },
                 };
 
@@ -185,7 +159,9 @@ impl<C: Collate> Overlaps<Range<C::Value>, Collator<C>> for Range<C::Value> {
                         (Ordering::Equal, Ordering::Equal) => Overlap::Wide,
                     }
                 }
-                Ordering::Equal => (&self.start, &self.end).overlaps(&(&other.start, &other.end)),
+                Ordering::Equal => {
+                    (&self.start, &self.end).overlaps(&(&other.start, &other.end), &collator.value)
+                }
                 Ordering::Greater => {
                     let value = &self.prefix[other.prefix.len()];
 

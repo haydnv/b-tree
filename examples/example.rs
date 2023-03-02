@@ -13,15 +13,15 @@ use safecast::as_type;
 use tokio::fs;
 use tokio_util::io::StreamReader;
 
-use b_tree::{BTreeLock, BTreeReadGuard, Node, Range, Schema};
+use b_tree::{BTreeLock, BTreeReadGuard, Key, Node, Range, Schema};
 
 const BLOCK_SIZE: usize = 4_096;
 
 enum File {
-    Node(Node<i16>),
+    Node(Node<Vec<Key<i16>>>),
 }
 
-as_type!(File, Node, Node<i16>);
+as_type!(File, Node, Node<Vec<Key<i16>>>);
 
 struct FileVisitor;
 
@@ -191,15 +191,16 @@ async fn functional_test() -> Result<(), io::Error> {
             let key = vec![lo, hi, spread];
 
             assert!(!view.contains(&key).await?);
-            assert!(view.is_empty(&Range::with_prefix(vec![i])).await?);
+            assert!(view.is_empty(&Range::from_prefix(vec![i])).await?);
 
             assert!(view.insert(key.clone()).await?);
 
             assert!(view.contains(&key).await?);
-            assert!(!view.is_empty(&Range::with_prefix(vec![i])).await?);
+            assert!(!view.is_empty(&Range::from_prefix(vec![i])).await?);
 
             assert_eq!(view.count(&Range::new(vec![], 0..i)).await?, (i as u64) - 1);
-            assert_eq!(view.count(&Range::with_prefix(vec![i])).await?, 1);
+
+            assert_eq!(view.count(&Range::from_prefix(vec![i])).await?, 1);
             assert_eq!(view.count(&Range::default()).await?, i as u64);
 
             #[cfg(debug_assertions)]
@@ -367,8 +368,8 @@ async fn load_test() -> Result<(), io::Error> {
 
 #[tokio::main]
 async fn main() -> Result<(), io::Error> {
-    load_test().await?;
     functional_test().await?;
+    load_test().await?;
     Ok(())
 }
 
