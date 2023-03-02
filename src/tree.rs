@@ -191,7 +191,7 @@ where
     ) -> Pin<Box<dyn Future<Output = Result<u64, io::Error>> + 'a>> {
         Box::pin(async move {
             match &*node {
-                Node::Leaf(keys) if range == &Range::default() => Ok(keys.len() as u64),
+                Node::Leaf(keys) if range.is_default() => Ok(keys.len() as u64),
                 Node::Leaf(keys) => {
                     let (l, r) = keys.bisect(range, &*self.collator);
 
@@ -207,7 +207,7 @@ where
                         Ok((r - l) as u64)
                     }
                 }
-                Node::Index(_bounds, children) if range == &Range::default() => {
+                Node::Index(_bounds, children) if range.is_default() => {
                     stream::iter(children)
                         .then(|node_id| self.dir.read_file(node_id))
                         .map_ok(|node| self.count_inner(range, node))
@@ -311,7 +311,7 @@ where
         range: &'a Range<S::Value>,
     ) -> impl Stream<Item = Result<FileReadGuardOwned<FE, [Key<S::Value>]>, io::Error>> + Sized + 'a
     {
-        let range = if range == &Range::default() {
+        let range = if range.is_default() {
             None
         } else {
             Some(range)
@@ -492,7 +492,7 @@ where
     let file = dir.get_file(&node_id).expect("node").clone();
     let fut = file.into_read().map_ok(move |node| {
         let keys: IntoStream<V> = match &*node {
-            Node::Leaf(keys) if *range == Range::default() => {
+            Node::Leaf(keys) if range.is_default() => {
                 let keys = stream::iter(keys.to_vec().into_iter().map(Ok));
                 Box::pin(keys)
             }
@@ -511,7 +511,7 @@ where
                     Box::pin(stream::iter(keys[l..r].to_vec().into_iter().map(Ok)))
                 }
             }
-            Node::Index(_bounds, children) if *range == Range::default() => {
+            Node::Index(_bounds, children) if range.is_default() => {
                 let keys = stream::iter(children.to_vec())
                     .map(move |node_id| {
                         into_stream_forward(dir.clone(), collator.clone(), range.clone(), node_id)
@@ -581,7 +581,7 @@ where
     let file = dir.get_file(&node_id).expect("node").clone();
     let fut = file.into_read().map_ok(move |node| {
         let keys: IntoStream<V> = match &*node {
-            Node::Leaf(keys) if *range == Range::default() => {
+            Node::Leaf(keys) if range.is_default() => {
                 let keys = keys.iter().rev().cloned().collect::<Vec<_>>();
                 Box::pin(stream::iter(keys.into_iter().map(Ok)))
             }
@@ -601,7 +601,7 @@ where
                     Box::pin(stream::iter(keys.into_iter().map(Ok)))
                 }
             }
-            Node::Index(_bounds, children) if *range == Range::default() => {
+            Node::Index(_bounds, children) if range.is_default() => {
                 let children = children.iter().rev().copied().collect::<Vec<_>>();
                 let keys = stream::iter(children)
                     .map(move |node_id| {
