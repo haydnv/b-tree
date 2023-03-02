@@ -58,7 +58,11 @@ impl<V> Range<V> {
     }
 }
 
-impl<C: Collate> Overlaps<Key<C::Value>, Collator<C>> for Range<C::Value> where C::Value: fmt::Debug {
+impl<C> Overlaps<Key<C::Value>, Collator<C>> for Range<C::Value>
+where
+    C: Collate,
+    C::Value: fmt::Debug,
+{
     fn overlaps(&self, key: &Key<C::Value>, collator: &Collator<C>) -> Overlap {
         match collator.cmp(&self.prefix, key) {
             Ordering::Less => Overlap::Less,

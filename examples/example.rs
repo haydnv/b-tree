@@ -21,56 +21,24 @@ enum File {
     Node(Node<Vec<Key<i16>>>),
 }
 
-as_type!(File, Node, Node<Vec<Key<i16>>>);
-
-struct FileVisitor;
-
-#[async_trait]
-impl de::Visitor for FileVisitor {
-    type Value = File;
-
-    fn expecting() -> &'static str {
-        "a B+Tree node"
-    }
-
-    async fn visit_seq<A: de::SeqAccess>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-        let leaf = seq.expect_next::<bool>(()).await?;
-
-        if leaf {
-            seq.expect_next(())
-                .map_ok(Node::Leaf)
-                .map_ok(File::Node)
-                .await
-        } else {
-            seq.expect_next(())
-                .map_ok(|(bounds, children)| Node::Index(bounds, children))
-                .map_ok(File::Node)
-                .await
-        }
-    }
-}
-
 #[async_trait]
 impl de::FromStream for File {
     type Context = ();
 
-    async fn from_stream<D: de::Decoder>(_: (), decoder: &mut D) -> Result<Self, D::Error> {
-        decoder.decode_seq(FileVisitor).await
+    async fn from_stream<D: de::Decoder>(cxt: (), decoder: &mut D) -> Result<Self, D::Error> {
+        Node::from_stream(cxt, decoder).map_ok(Self::Node).await
     }
 }
 
 impl<'en> en::ToStream<'en> for File {
     fn to_stream<E: en::Encoder<'en>>(&'en self, encoder: E) -> Result<E::Ok, E::Error> {
-        use en::IntoStream;
-
         match self {
-            Self::Node(node) => match node {
-                Node::Leaf(keys) => (true, keys).into_stream(encoder),
-                Node::Index(bounds, children) => (false, (bounds, children)).into_stream(encoder),
-            },
+            Self::Node(node) => node.to_stream(encoder),
         }
     }
 }
+
+as_type!(File, Node, Node<Vec<Key<i16>>>);
 
 #[async_trait]
 impl FileLoad for File {

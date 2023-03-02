@@ -1,7 +1,11 @@
 use std::cmp::Ordering;
 use std::fmt;
+use std::marker::PhantomData;
 
+use async_trait::async_trait;
 use collate::{Collate, Overlap, Overlaps};
+use destream::{de, en};
+use futures::TryFutureExt;
 use uuid::Uuid;
 
 use super::range::Range;
@@ -71,9 +75,7 @@ impl<V: fmt::Debug> Block<V> for Vec<Key<V>> {
         while lo < hi {
             let mid = (lo + hi) >> 1;
             match range.overlaps(&self[mid], collator) {
-                Overlap::Less => {
-                    hi = mid
-                },
+                Overlap::Less => hi = mid,
                 _ => lo = mid + 1,
             }
         }
@@ -133,6 +135,85 @@ impl<N> Node<N> {
         match self {
             Self::Leaf(_) => true,
             _ => false,
+        }
+    }
+}
+
+struct NodeVisitor<C, N> {
+    context: C,
+    phantom: PhantomData<N>,
+}
+
+impl<C, N> NodeVisitor<C, N> {
+    fn new(context: C) -> Self {
+        Self {
+            context,
+            phantom: PhantomData,
+        }
+    }
+}
+
+#[async_trait]
+impl<N> de::Visitor for NodeVisitor<N::Context, N>
+where
+    N: de::FromStream,
+{
+    type Value = Node<N>;
+
+    fn expecting() -> &'static str {
+        "a B+Tree node"
+    }
+
+    async fn visit_seq<A: de::SeqAccess>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let leaf = seq.expect_next::<bool>(()).await?;
+
+        if leaf {
+            seq.expect_next(self.context).map_ok(Node::Leaf).await
+        } else {
+            let bounds = seq.expect_next(self.context).await?;
+            let children = seq.expect_next(()).await?;
+            Ok(Node::Index(bounds, children))
+        }
+    }
+}
+
+#[async_trait]
+impl<N> de::FromStream for Node<N>
+where
+    N: de::FromStream,
+{
+    type Context = N::Context;
+
+    async fn from_stream<D: de::Decoder>(
+        cxt: Self::Context,
+        decoder: &mut D,
+    ) -> Result<Self, D::Error> {
+        decoder.decode_seq(NodeVisitor::new(cxt)).await
+    }
+}
+
+impl<'en, N: 'en> en::IntoStream<'en> for Node<N>
+where
+    N: en::IntoStream<'en>,
+{
+    fn into_stream<E: en::Encoder<'en>>(self, encoder: E) -> Result<E::Ok, E::Error> {
+        match self {
+            Node::Leaf(keys) => (true, keys).into_stream(encoder),
+            Node::Index(bounds, children) => (false, bounds, children).into_stream(encoder),
+        }
+    }
+}
+
+impl<'en, N: 'en> en::ToStream<'en> for Node<N>
+where
+    N: en::ToStream<'en>,
+{
+    fn to_stream<E: en::Encoder<'en>>(&'en self, encoder: E) -> Result<E::Ok, E::Error> {
+        use en::IntoStream;
+
+        match self {
+            Node::Leaf(keys) => (true, keys).into_stream(encoder),
+            Node::Index(bounds, children) => (false, bounds, children).into_stream(encoder),
         }
     }
 }

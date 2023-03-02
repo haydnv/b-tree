@@ -191,9 +191,7 @@ where
     ) -> Pin<Box<dyn Future<Output = Result<u64, io::Error>> + 'a>> {
         Box::pin(async move {
             match &*node {
-                Node::Leaf(keys) if range == &Range::default() => {
-                    Ok(keys.len() as u64)
-                },
+                Node::Leaf(keys) if range == &Range::default() => Ok(keys.len() as u64),
                 Node::Leaf(keys) => {
                     let (l, r) = keys.bisect(range, &*self.collator);
 

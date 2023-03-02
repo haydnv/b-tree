@@ -13,7 +13,9 @@ categories = ["database", "database-implementations", "data-structures"]
 name = "example"
 
 [dependencies]
+async-trait = "0.1"
 collate = { path = "../collate" }
+destream = "0.6"
 freqfs = { path = "../freqfs" }
 futures = "0.3"
 num_cpus = "1.15"
@@ -22,9 +24,7 @@ safecast = { path = "../safecast" }
 uuid = "1.3"
 
 [dev-dependencies]
-async-trait = "0.1"
 bytes = "1.4"
-destream = "0.6"
 destream_json = { version = "0.10", features=["tokio-io"] }
 rand = "0.8"
 tokio = { version = "1.25", features = ["macros"] }
