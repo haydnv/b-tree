@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::ops::{Bound, Range as Bounds};
 
-use collate::{Collate, Overlap, Overlaps};
+use collate::{Collate, Overlap, OverlapsRange, OverlapsValue};
 
 use super::{Collator, Key};
 
@@ -58,12 +58,12 @@ impl<V> Range<V> {
     }
 }
 
-impl<C> Overlaps<Key<C::Value>, Collator<C>> for Range<C::Value>
+impl<C> OverlapsValue<Key<C::Value>, Collator<C>> for Range<C::Value>
 where
     C: Collate,
     C::Value: fmt::Debug,
 {
-    fn overlaps(&self, key: &Key<C::Value>, collator: &Collator<C>) -> Overlap {
+    fn overlaps_value(&self, key: &Key<C::Value>, collator: &Collator<C>) -> Overlap {
         match collator.cmp(&self.prefix, key) {
             Ordering::Less => Overlap::Less,
             Ordering::Greater => Overlap::Greater,
@@ -110,7 +110,7 @@ where
     }
 }
 
-impl<C: Collate> Overlaps<Range<C::Value>, Collator<C>> for Range<C::Value> {
+impl<C: Collate> OverlapsRange<Range<C::Value>, Collator<C>> for Range<C::Value> {
     fn overlaps(&self, other: &Range<C::Value>, collator: &Collator<C>) -> Overlap {
         #[inline]
         fn cmp_start<C>(collator: &C, bound: &Bound<C::Value>, value: &C::Value) -> Ordering

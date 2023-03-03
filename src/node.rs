@@ -3,7 +3,7 @@ use std::fmt;
 use std::marker::PhantomData;
 
 use async_trait::async_trait;
-use collate::{Collate, Overlap, Overlaps};
+use collate::{Collate, Overlap, OverlapsValue};
 use destream::{de, en};
 use futures::TryFutureExt;
 use uuid::Uuid;
@@ -43,13 +43,13 @@ impl<V: fmt::Debug> Block<V> for Vec<Key<V>> {
         }
 
         if let Some(first) = self.first() {
-            if range.overlaps(first, collator) == Overlap::Less {
+            if range.overlaps_value(first, collator) == Overlap::Less {
                 return (0, 0);
             }
         }
 
         if let Some(last) = self.last() {
-            if range.overlaps(last, collator) == Overlap::Greater {
+            if range.overlaps_value(last, collator) == Overlap::Greater {
                 return (self.len(), self.len());
             }
         }
@@ -60,7 +60,7 @@ impl<V: fmt::Debug> Block<V> for Vec<Key<V>> {
 
         while lo < hi {
             let mid = (lo + hi) >> 1;
-            match range.overlaps(&self[mid], collator) {
+            match range.overlaps_value(&self[mid], collator) {
                 Overlap::Greater => lo = mid + 1,
                 _ => hi = mid,
             }
@@ -74,7 +74,7 @@ impl<V: fmt::Debug> Block<V> for Vec<Key<V>> {
 
         while lo < hi {
             let mid = (lo + hi) >> 1;
-            match range.overlaps(&self[mid], collator) {
+            match range.overlaps_value(&self[mid], collator) {
                 Overlap::Less => hi = mid,
                 _ => lo = mid + 1,
             }

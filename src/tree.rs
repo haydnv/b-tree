@@ -1,10 +1,9 @@
 use std::ops::Deref;
 use std::pin::Pin;
-use std::string::ToString;
 use std::sync::Arc;
 use std::{fmt, io};
 
-use collate::{Collate, Overlaps};
+use collate::{Collate, OverlapsValue};
 use freqfs::{
     Dir, DirLock, DirReadGuardOwned, DirWriteGuardOwned, FileLoad, FileReadGuard,
     FileReadGuardOwned, FileWriteGuardOwned,
@@ -198,7 +197,7 @@ where
                     if l == keys.len() {
                         Ok(0)
                     } else if l == r {
-                        if range.contains(&keys[l], &*self.collator) {
+                        if range.contains_value(&keys[l], &*self.collator) {
                             Ok(1)
                         } else {
                             Ok(0)
@@ -336,7 +335,7 @@ where
                                 let (l, r) = keys.bisect(range, &*self.collator);
 
                                 let slice = if l == r && l < keys.len() {
-                                    if range.contains(&keys[l], &*self.collator) {
+                                    if range.contains_value(&keys[l], &*self.collator) {
                                         &keys[l..l + 1]
                                     } else {
                                         &keys[l..l]
@@ -502,7 +501,7 @@ where
                 if l == keys.len() || r == 0 {
                     Box::pin(stream::empty())
                 } else if l == r {
-                    if range.contains(&keys[l], &*collator) {
+                    if range.contains_value(&keys[l], &*collator) {
                         Box::pin(stream::once(future::ready(Ok(keys[l].to_vec()))))
                     } else {
                         Box::pin(stream::empty())
@@ -591,7 +590,7 @@ where
                 if l == keys.len() || r == 0 {
                     Box::pin(stream::empty())
                 } else if l == r {
-                    if range.contains(&keys[l], &*collator) {
+                    if range.contains_value(&keys[l], &*collator) {
                         Box::pin(stream::once(future::ready(Ok(keys[l].to_vec()))))
                     } else {
                         Box::pin(stream::empty())
