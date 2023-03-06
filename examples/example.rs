@@ -99,6 +99,14 @@ impl<T: fmt::Debug> Schema for ExampleSchema<T> {
         BLOCK_SIZE
     }
 
+    fn extract_key(&self, _row: &[Self::Value], _other: &Self) -> Key<Self::Value> {
+        unimplemented!("extract key for other schema")
+    }
+
+    fn len(&self) -> usize {
+        self.size
+    }
+
     fn order(&self) -> usize {
         5
     }

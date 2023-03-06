@@ -148,6 +148,11 @@ where
     G: Deref<Target = Dir<FE>> + 'static,
     Node<S::Value>: fmt::Debug,
 {
+    /// Borrow the [`Schema`] of this [`BTree`].
+    pub fn schema(&self) -> &S {
+        &self.schema
+    }
+
     /// Return `true` if this B+Tree contains the given `key`.
     pub async fn contains(&self, key: &Key<S::Value>) -> Result<bool, io::Error> {
         let mut node = self.dir.read_file(&ROOT).await?;
@@ -1052,6 +1057,7 @@ where
     }
 
     /// Insert the given `key` into this B+Tree.
+    /// Return `false` if te given `key` is already present.
     pub async fn insert(&mut self, key: Key<S::Value>) -> Result<bool, S::Error> {
         let key = self.schema.validate(key)?;
         self.insert_root(key).await
@@ -1065,7 +1071,7 @@ where
             Node::Leaf(keys) => {
                 let i = keys.bisect_left(&key, &*self.collator);
 
-                if i < keys.len() && keys[i] == key {
+                if keys.get(i) == Some(&key) {
                     // no-op
                     return Ok(false);
                 }
