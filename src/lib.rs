@@ -67,11 +67,6 @@ pub trait Schema: Eq + fmt::Debug {
     /// Get the maximum size in bytes of a leaf node in a B+Tree with this [`Schema`].
     fn block_size(&self) -> usize;
 
-    /// Given a key matching this [`Schema`], extract a key matching the `other` [`Schema`].
-    /// This values in `key` must be in order, but the values in `other` may be in any order.
-    /// Panics: if `other` is not a subset of `self`.
-    fn extract_key(&self, key: &[Self::Value], other: &Self) -> Key<Self::Value>;
-
     /// Get the number of columns in this [`Schema`].
     fn len(&self) -> usize;
 
