@@ -285,7 +285,7 @@ where
     }
 
     /// Return `true` if the given `range` of this B+Tree contains zero keys.
-    pub async fn is_empty(&self, range: &Range<S::Value>) -> Result<bool, S::Error> {
+    pub async fn is_empty(&self, range: &Range<S::Value>) -> Result<bool, io::Error> {
         let mut node = self.dir.read_file(&ROOT).await?;
 
         Ok(loop {
