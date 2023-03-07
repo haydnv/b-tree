@@ -68,7 +68,7 @@ where
         match collator.cmp(&self.prefix, key) {
             Ordering::Less => Overlap::Less,
             Ordering::Greater => Overlap::Greater,
-            Ordering::Equal if self.prefix.len() > key.len() => Overlap::Narrow,
+            Ordering::Equal if self.prefix.len() >= key.len() => Overlap::Narrow,
             Ordering::Equal => {
                 let value = &key[self.prefix.len()];
 
