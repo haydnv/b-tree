@@ -26,14 +26,15 @@ impl<V> Default for Range<V> {
 
 impl<V> Range<V> {
     /// Construct a new [`Range`] with the given `prefix`.
-    pub fn new(prefix: Vec<V>, range: Bounds<V>) -> Self {
-        let Bounds { start, end } = range;
+    pub fn with_bounds(prefix: Vec<V>, bounds: (Bound<V>, Bound<V>)) -> Self {
+        let (start, end) = bounds;
+        Self { prefix, start, end }
+    }
 
-        Self {
-            prefix,
-            start: Bound::Included(start),
-            end: Bound::Excluded(end),
-        }
+    /// Construct a new [`Range`] with the given `prefix`.
+    pub fn with_range(prefix: Vec<V>, range: Bounds<V>) -> Self {
+        let Bounds { start, end } = range;
+        Self::with_bounds(prefix, (Bound::Included(start), Bound::Excluded(end)))
     }
 
     /// Construct a new [`Range`] with only the given `prefix`.

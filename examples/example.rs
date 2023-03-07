@@ -99,10 +99,6 @@ impl<T: fmt::Debug> Schema for ExampleSchema<T> {
         BLOCK_SIZE
     }
 
-    fn extract_key(&self, _row: &[Self::Value], _other: &Self) -> Key<Self::Value> {
-        unimplemented!("extract key for other schema")
-    }
-
     fn len(&self) -> usize {
         self.size
     }
@@ -174,7 +170,10 @@ async fn functional_test() -> Result<(), io::Error> {
             assert!(view.contains(&key).await?);
             assert!(!view.is_empty(&Range::from_prefix(vec![i])).await?);
 
-            assert_eq!(view.count(&Range::new(vec![], 0..i)).await?, (i as u64) - 1);
+            assert_eq!(
+                view.count(&Range::with_range(vec![], 0..i)).await?,
+                (i as u64) - 1
+            );
 
             assert_eq!(view.count(&Range::from_prefix(vec![i])).await?, 1);
             assert_eq!(view.count(&Range::default()).await?, i as u64);
@@ -186,7 +185,7 @@ async fn functional_test() -> Result<(), io::Error> {
         let mut i = 1;
 
         {
-            let range = Range::new(vec![], 0..67);
+            let range = Range::with_range(vec![], 0..67);
             let mut nodes = view.to_stream(&range);
             while let Some(node) = nodes.try_next().await? {
                 for key in &*node {
@@ -197,7 +196,7 @@ async fn functional_test() -> Result<(), io::Error> {
         }
 
         {
-            let range = Range::new(vec![], 67..250);
+            let range = Range::with_range(vec![], 67..250);
             let mut nodes = view.to_stream(&range);
             while let Some(node) = nodes.try_next().await? {
                 for key in &*node {
@@ -208,14 +207,14 @@ async fn functional_test() -> Result<(), io::Error> {
         }
 
         let mut i = 1;
-        let mut keys = view.into_stream(Range::new(vec![], 0..123), false);
+        let mut keys = view.into_stream(Range::with_range(vec![], 0..123), false);
         while let Some(key) = keys.try_next().await? {
             assert_eq!(key[0], i);
             i += 1;
         }
 
         let view = btree.read().await;
-        let mut keys = view.into_stream(Range::new(vec![], 123..n), false);
+        let mut keys = view.into_stream(Range::with_range(vec![], 123..n), false);
         while let Some(key) = keys.try_next().await? {
             assert_eq!(key[0], i);
             i += 1;
@@ -226,7 +225,7 @@ async fn functional_test() -> Result<(), io::Error> {
 
         for i in 1..n {
             let count = (i as u64) - 1;
-            let range_left = Range::new(vec![], 0..i);
+            let range_left = Range::with_range(vec![], 0..i);
 
             assert_eq!(
                 count_keys(&view, &range_left).await?,
