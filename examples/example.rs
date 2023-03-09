@@ -1,17 +1,15 @@
 use std::marker::PhantomData;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::{fmt, io};
 
 use async_trait::async_trait;
-use bytes::Bytes;
 use collate::Collator;
 use destream::{de, en};
-use freqfs::{Cache, FileLoad};
+use freqfs::Cache;
 use futures::{TryFutureExt, TryStreamExt};
 use rand::Rng;
 use safecast::as_type;
 use tokio::fs;
-use tokio_util::io::StreamReader;
 
 use b_tree::{BTreeLock, BTreeReadGuard, Key, Node, Range, Schema};
 
@@ -39,34 +37,6 @@ impl<'en> en::ToStream<'en> for File {
 }
 
 as_type!(File, Node, Node<Vec<Key<i16>>>);
-
-#[async_trait]
-impl FileLoad for File {
-    async fn load(
-        _path: &Path,
-        file: fs::File,
-        _metadata: std::fs::Metadata,
-    ) -> Result<Self, io::Error> {
-        destream_json::de::read_from((), file)
-            .map_err(|cause| io::Error::new(io::ErrorKind::InvalidData, cause))
-            .await
-    }
-
-    async fn save(&self, file: &mut fs::File) -> Result<u64, io::Error> {
-        let encoded = destream_json::en::encode(self)
-            .map_err(|cause| io::Error::new(io::ErrorKind::InvalidData, cause))?;
-
-        let mut reader = StreamReader::new(
-            encoded
-                .map_ok(Bytes::from)
-                .map_err(|cause| io::Error::new(io::ErrorKind::InvalidData, cause)),
-        );
-
-        let size = tokio::io::copy(&mut reader, file).await?;
-        assert!(size > 0);
-        Ok(size)
-    }
-}
 
 #[derive(Debug)]
 struct ExampleSchema<T> {

@@ -62,7 +62,7 @@ impl<C> Eq for Collator<C> where C: Collate {}
 /// The schema of a B+Tree
 pub trait Schema: Eq + fmt::Debug {
     type Error: std::error::Error + From<io::Error>;
-    type Value: Clone + Eq + fmt::Debug + 'static;
+    type Value: Clone + Eq + Send + Sync + fmt::Debug + 'static;
 
     /// Get the maximum size in bytes of a leaf node in a B+Tree with this [`Schema`].
     fn block_size(&self) -> usize;

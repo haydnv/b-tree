@@ -57,7 +57,8 @@ impl<S, C, FE> BTreeLock<S, C, FE> {
 impl<S, C, FE> BTreeLock<S, C, FE>
 where
     S: Schema,
-    FE: FileLoad + AsType<Node<S::Value>>,
+    FE: AsType<Node<S::Value>> + Send + Sync,
+    Node<S::Value>: FileLoad,
 {
     fn new(schema: S, collator: C, dir: DirLock<FE>) -> Self {
         Self {
@@ -101,7 +102,7 @@ where
 
 impl<S, C, FE> BTreeLock<S, C, FE>
 where
-    FE: FileLoad,
+    FE: Send + Sync,
 {
     /// Lock this B+Tree for reading
     pub async fn read(&self) -> BTreeReadGuard<S, C, FE> {
@@ -144,9 +145,9 @@ impl<S, C, FE, G> BTree<S, C, G>
 where
     S: Schema,
     C: Collate<Value = S::Value> + 'static,
-    FE: FileLoad + AsType<Node<S::Value>>,
+    FE: AsType<Node<S::Value>> + Send + Sync + 'static,
     G: Deref<Target = Dir<FE>> + 'static,
-    Node<S::Value>: fmt::Debug,
+    Node<S::Value>: FileLoad + fmt::Debug,
 {
     /// Borrow the [`Schema`] of this [`BTree`].
     pub fn schema(&self) -> &S {
@@ -490,8 +491,9 @@ fn into_stream_forward<C, V, FE, G>(
 where
     C: Collate<Value = V> + 'static,
     V: Clone + PartialEq + fmt::Debug + 'static,
-    FE: FileLoad + AsType<Node<V>>,
+    FE: AsType<Node<V>> + Send + Sync + 'static,
     G: Deref<Target = Dir<FE>> + 'static,
+    Node<V>: FileLoad,
 {
     let file = dir.get_file(&node_id).expect("node").clone();
     let fut = file.into_read().map_ok(move |node| {
@@ -578,9 +580,10 @@ fn into_stream_reverse<C, V, FE, G>(
 ) -> IntoStream<V>
 where
     C: Collate<Value = V> + 'static,
-    V: Clone + PartialEq + fmt::Debug + 'static,
-    FE: FileLoad + AsType<Node<V>>,
+    V: Clone + PartialEq + fmt::Debug + Send + Sync + 'static,
+    FE: AsType<Node<V>> + Send + Sync + 'static,
     G: Deref<Target = Dir<FE>> + 'static,
+    Node<V>: FileLoad,
 {
     let file = dir.get_file(&node_id).expect("node").clone();
     let fut = file.into_read().map_ok(move |node| {
@@ -705,7 +708,8 @@ impl<S, C, FE> BTree<S, C, DirWriteGuardOwned<FE>>
 where
     S: Schema,
     C: Collate<Value = S::Value> + 'static,
-    FE: FileLoad + AsType<Node<S::Value>>,
+    FE: AsType<Node<S::Value>> + Send + Sync + 'static,
+    Node<S::Value>: FileLoad,
 {
     /// Delete the given `key` from this B+Tree.
     pub async fn delete(&mut self, key: Key<S::Value>) -> Result<bool, S::Error> {
