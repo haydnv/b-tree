@@ -9,14 +9,18 @@ readme = "README.md"
 keywords = ["persistent", "ordered", "key", "key-value", "index", "collection"]
 categories = ["database", "database-implementations", "data-structures"]
 
+[features]
+stream = ["freqfs/stream"]
+
 [[example]]
 name = "example"
+required-features = ["stream"]
 
 [dependencies]
 async-trait = "0.1"
 collate = { path = "../collate" }
 destream = { path = "../destream" }
-freqfs = { path = "../freqfs", features = ["stream"] }
+freqfs = { path = "../freqfs" }
 futures = "0.3"
 num_cpus = "1.15"
 pin-project = "1.0"
