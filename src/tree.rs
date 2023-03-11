@@ -86,17 +86,13 @@ where
 
     /// Load a [`BTreeLock`] with the given `schema` and `collator` from `dir`
     pub fn load(schema: S, collator: C, dir: DirLock<FE>) -> Result<Self, io::Error> {
-        let nodes = dir.try_read_owned()?;
+        let mut nodes = dir.try_write_owned()?;
 
-        if let Some(root) = nodes.get_file(&ROOT) {
-            let _root = root.try_read()?;
-            return Ok(Self::new(schema, collator, dir));
+        if !nodes.contains(&ROOT) {
+            nodes.create_file(ROOT.to_string(), Node::Leaf(vec![]), 0)?;
         }
 
-        Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "B+Tree is missing a root node",
-        ))
+        Ok(Self::new(schema, collator, dir))
     }
 }
 
