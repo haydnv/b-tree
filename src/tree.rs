@@ -1341,28 +1341,12 @@ where
     FE: AsType<Node<S::Value>> + Send + Sync + 'static,
     Node<S::Value>: FileLoad,
 {
-    /// Merge the keys in the `other` B+Tree range into this one.
+    /// Merge the keys from the `other` B+Tree range into this one.
     ///
     /// The source B+Tree **must** have an identical schema and collation.
     pub async fn merge(&mut self, other: BTreeReadGuard<S, C, FE>) -> Result<(), S::Error> {
-        if self.collator != other.collator {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "B+Tree to merge must have the same collation",
-            )
-            .into());
-        }
-
-        if self.schema != other.schema {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "cannot merge a B+Tree with schema {:?} into one with schema {:?}",
-                    other.schema, self.schema
-                ),
-            )
-            .into());
-        }
+        validate_collator_eq(&self.collator, &other.collator)?;
+        validate_schema_eq(&self.schema, &other.schema)?;
 
         let mut keys = other.into_stream(Range::default(), false);
         while let Some(key) = keys.try_next().await? {
@@ -1370,6 +1354,56 @@ where
         }
 
         Ok(())
+    }
+
+    /// Delete the keys in the `other` B+Tree from this one.
+    ///
+    /// The source B+Tree **must** have an identical schema and collation.
+    pub async fn delete_all(&mut self, other: BTreeReadGuard<S, C, FE>) -> Result<(), S::Error> {
+        validate_collator_eq(&self.collator, &other.collator)?;
+        validate_schema_eq(&self.schema, &other.schema)?;
+
+        let mut keys = other.into_stream(Range::default(), false);
+        while let Some(key) = keys.try_next().await? {
+            self.delete(key).await?;
+        }
+
+        Ok(())
+    }
+}
+
+#[inline]
+fn validate_collator_eq<S>(this: &S, that: &S) -> Result<(), io::Error>
+where
+    S: PartialEq,
+{
+    if this == that {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "B+Tree to merge must have the same collation",
+        )
+        .into())
+    }
+}
+
+#[inline]
+fn validate_schema_eq<S>(this: &S, that: &S) -> Result<(), io::Error>
+where
+    S: PartialEq + fmt::Debug,
+{
+    if this == that {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "cannot merge a B+Tree with schema {:?} into one with schema {:?}",
+                that, this
+            ),
+        )
+        .into())
     }
 }
 
