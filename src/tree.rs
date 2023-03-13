@@ -742,8 +742,8 @@ enum Insert<V> {
 
 impl<S, C, FE> BTree<S, C, DirWriteGuardOwned<FE>>
 where
-    S: Schema,
-    C: Collate<Value = S::Value>,
+    S: Schema + Send + Sync,
+    C: Collate<Value = S::Value> + Send + Sync,
     FE: AsType<Node<S::Value>> + Send + Sync,
     Node<S::Value>: FileLoad,
 {
@@ -1209,7 +1209,7 @@ where
         &'a mut self,
         node: &'a mut Node<S::Value>,
         key: Key<S::Value>,
-    ) -> Pin<Box<dyn Future<Output = Result<Insert<S::Value>, io::Error>> + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Insert<S::Value>, io::Error>> + Send + 'a>> {
         Box::pin(async move {
             let order = self.schema.order();
 
@@ -1336,7 +1336,7 @@ where
 
 impl<S, C, FE> BTree<S, C, DirWriteGuardOwned<FE>>
 where
-    S: Schema,
+    S: Schema + Send + Sync,
     C: Collate<Value = S::Value> + Send + Sync + 'static,
     FE: AsType<Node<S::Value>> + Send + Sync + 'static,
     Node<S::Value>: FileLoad,
