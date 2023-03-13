@@ -15,7 +15,7 @@ pub use node::{Block, Node};
 pub use range::Range;
 pub use tree::{BTree, BTreeLock, BTreeReadGuard, BTreeWriteGuard};
 
-extern crate collate;
+pub use collate;
 
 /// A key in a B+Tree
 pub type Key<V> = Vec<V>;
