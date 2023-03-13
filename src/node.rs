@@ -1,11 +1,11 @@
 use std::cmp::Ordering;
 use std::fmt;
-use std::marker::PhantomData;
 
+#[cfg(feature = "stream")]
 use async_trait::async_trait;
 use collate::{Collate, Overlap, OverlapsValue};
+#[cfg(feature = "stream")]
 use destream::{de, en};
-use futures::TryFutureExt;
 use uuid::Uuid;
 
 use super::range::Range;
@@ -139,20 +139,23 @@ impl<N> Node<N> {
     }
 }
 
+#[cfg(feature = "stream")]
 struct NodeVisitor<C, N> {
     context: C,
-    phantom: PhantomData<N>,
+    phantom: std::marker::PhantomData<N>,
 }
 
+#[cfg(feature = "stream")]
 impl<C, N> NodeVisitor<C, N> {
     fn new(context: C) -> Self {
         Self {
             context,
-            phantom: PhantomData,
+            phantom: std::marker::PhantomData,
         }
     }
 }
 
+#[cfg(feature = "stream")]
 #[async_trait]
 impl<N> de::Visitor for NodeVisitor<N::Context, N>
 where
@@ -168,7 +171,10 @@ where
         let leaf = seq.expect_next::<bool>(()).await?;
 
         if leaf {
-            seq.expect_next(self.context).map_ok(Node::Leaf).await
+            match seq.expect_next(self.context).await {
+                Ok(leaf) => Ok(Node::Leaf(leaf)),
+                Err(cause) => Err(cause),
+            }
         } else {
             let bounds = seq.expect_next(self.context).await?;
             let children = seq.expect_next(()).await?;
@@ -177,6 +183,7 @@ where
     }
 }
 
+#[cfg(feature = "stream")]
 #[async_trait]
 impl<N> de::FromStream for Node<N>
 where
@@ -192,6 +199,7 @@ where
     }
 }
 
+#[cfg(feature = "stream")]
 impl<'en, N: 'en> en::IntoStream<'en> for Node<N>
 where
     N: en::IntoStream<'en>,
@@ -204,6 +212,7 @@ where
     }
 }
 
+#[cfg(feature = "stream")]
 impl<'en, N: 'en> en::ToStream<'en> for Node<N>
 where
     N: en::ToStream<'en>,

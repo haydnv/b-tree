@@ -3,8 +3,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::{fmt, io};
 
+#[cfg(feature = "stream")]
 use async_trait::async_trait;
 use collate::{Collate, OverlapsValue};
+#[cfg(feature = "stream")]
 use destream::de;
 use freqfs::*;
 use futures::future::{self, Future, FutureExt};
@@ -153,10 +155,12 @@ where
     }
 }
 
+#[cfg(feature = "stream")]
 struct BTreeVisitor<S, C, FE> {
     btree: BTreeLock<S, C, FE>,
 }
 
+#[cfg(feature = "stream")]
 #[async_trait]
 impl<S, C, FE> de::Visitor for BTreeVisitor<S, C, FE>
 where
@@ -183,6 +187,7 @@ where
     }
 }
 
+#[cfg(feature = "stream")]
 #[async_trait]
 impl<S, C, FE> de::FromStream for BTreeLock<S, C, FE>
 where

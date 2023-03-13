@@ -10,16 +10,16 @@ keywords = ["persistent", "ordered", "key", "key-value", "index", "collection"]
 categories = ["database", "database-implementations", "data-structures"]
 
 [features]
-stream = ["freqfs/stream"]
+stream = ["async-trait", "collate/stream", "destream", "freqfs/stream"]
 
 [[example]]
 name = "example"
 required-features = ["stream"]
 
 [dependencies]
-async-trait = "0.1"
+async-trait = { version = "0.1", optional = true }
 collate = { path = "../collate" }
-destream = { path = "../destream" }
+destream = { path = "../destream", optional = true }
 freqfs = { path = "../freqfs" }
 futures = "0.3"
 num_cpus = "1.15"
