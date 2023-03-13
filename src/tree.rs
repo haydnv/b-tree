@@ -105,10 +105,34 @@ impl<S, C, FE> BTreeLock<S, C, FE>
 where
     FE: Send + Sync,
 {
+    /// Lock this B+Tree for reading, without borrowing
+    pub async fn into_read(self) -> BTreeReadGuard<S, C, FE> {
+        self.dir
+            .into_read()
+            .map(|dir| BTree {
+                schema: self.schema.clone(),
+                collator: self.collator.clone(),
+                dir,
+            })
+            .await
+    }
+
     /// Lock this B+Tree for reading
     pub async fn read(&self) -> BTreeReadGuard<S, C, FE> {
         self.dir
             .read_owned()
+            .map(|dir| BTree {
+                schema: self.schema.clone(),
+                collator: self.collator.clone(),
+                dir,
+            })
+            .await
+    }
+
+    /// Lock this B+Tree for writing, without borrowing
+    pub async fn into_write(self) -> BTreeWriteGuard<S, C, FE> {
+        self.dir
+            .into_write()
             .map(|dir| BTree {
                 schema: self.schema.clone(),
                 collator: self.collator.clone(),
@@ -479,15 +503,17 @@ where
     Node<S::Value>: FileLoad + fmt::Debug,
 {
     /// Copy all the keys in the given `range` of this B+Tree.
-    pub fn into_stream(
+    pub fn into_stream<R: Into<Arc<Range<S::Value>>>>(
         self,
-        range: Range<S::Value>,
+        range: R,
         reverse: bool,
     ) -> impl Stream<Item = Result<Key<S::Value>, io::Error>> + Unpin + Send + Sized {
+        let range = range.into();
+
         if reverse {
-            into_stream_reverse(Arc::new(self.dir), self.collator, Arc::new(range), ROOT)
+            into_stream_reverse(Arc::new(self.dir), self.collator, range, ROOT)
         } else {
-            into_stream_forward(Arc::new(self.dir), self.collator, Arc::new(range), ROOT)
+            into_stream_forward(Arc::new(self.dir), self.collator, range, ROOT)
         }
     }
 }
