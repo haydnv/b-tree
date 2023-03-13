@@ -3,11 +3,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::{fmt, io};
 
+use async_trait::async_trait;
 use collate::{Collate, OverlapsValue};
-use freqfs::{
-    Dir, DirLock, DirReadGuardOwned, DirWriteGuardOwned, FileLoad, FileReadGuard,
-    FileReadGuardOwned, FileWriteGuardOwned,
-};
+use destream::de;
+use freqfs::*;
 use futures::future::{self, Future, FutureExt};
 use futures::stream::{self, Stream, StreamExt, TryStreamExt};
 use futures::try_join;
@@ -151,6 +150,57 @@ where
                 dir,
             })
             .await
+    }
+}
+
+struct BTreeVisitor<S, C, FE> {
+    btree: BTreeLock<S, C, FE>,
+}
+
+#[async_trait]
+impl<S, C, FE> de::Visitor for BTreeVisitor<S, C, FE>
+where
+    S: Schema + Send + Sync,
+    C: Collate<Value = S::Value> + Send + Sync,
+    FE: AsType<Node<S::Value>> + Send + Sync,
+    S::Value: de::FromStream<Context = ()>,
+    Node<S::Value>: FileLoad,
+{
+    type Value = BTreeLock<S, C, FE>;
+
+    fn expecting() -> &'static str {
+        "a BTree"
+    }
+
+    async fn visit_seq<A: de::SeqAccess>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let mut btree = self.btree.write().await;
+
+        while let Some(key) = seq.next_element(()).map_err(de::Error::custom).await? {
+            btree.insert(key).map_err(de::Error::custom).await?;
+        }
+
+        Ok(self.btree)
+    }
+}
+
+#[async_trait]
+impl<S, C, FE> de::FromStream for BTreeLock<S, C, FE>
+where
+    S: Schema + Send + Sync,
+    C: Collate<Value = S::Value> + Send + Sync,
+    FE: AsType<Node<S::Value>> + Send + Sync,
+    S::Value: de::FromStream<Context = ()>,
+    Node<S::Value>: FileLoad,
+{
+    type Context = (S, C, DirLock<FE>);
+
+    async fn from_stream<D: de::Decoder>(
+        context: Self::Context,
+        decoder: &mut D,
+    ) -> Result<Self, D::Error> {
+        let (schema, collator, dir) = context;
+        let btree = BTreeLock::create(schema, collator, dir).map_err(de::Error::custom)?;
+        decoder.decode_seq(BTreeVisitor { btree }).await
     }
 }
 
@@ -503,7 +553,7 @@ where
     Node<S::Value>: FileLoad + fmt::Debug,
 {
     /// Copy all the keys in the given `range` of this B+Tree.
-    pub fn into_stream<R: Into<Arc<Range<S::Value>>>>(
+    pub fn keys<R: Into<Arc<Range<S::Value>>>>(
         self,
         range: R,
         reverse: bool,
@@ -511,14 +561,14 @@ where
         let range = range.into();
 
         if reverse {
-            into_stream_reverse(Arc::new(self.dir), self.collator, range, ROOT)
+            keys_reverse(Arc::new(self.dir), self.collator, range, ROOT)
         } else {
-            into_stream_forward(Arc::new(self.dir), self.collator, range, ROOT)
+            keys_forward(Arc::new(self.dir), self.collator, range, ROOT)
         }
     }
 }
 
-fn into_stream_forward<C, V, FE, G>(
+fn keys_forward<C, V, FE, G>(
     dir: Arc<G>,
     collator: Arc<Collator<C>>,
     range: Arc<Range<V>>,
@@ -556,7 +606,7 @@ where
             Node::Index(_bounds, children) if range.is_default() => {
                 let keys = stream::iter(children.to_vec())
                     .map(move |node_id| {
-                        into_stream_forward(dir.clone(), collator.clone(), range.clone(), node_id)
+                        keys_forward(dir.clone(), collator.clone(), range.clone(), node_id)
                     })
                     .flatten();
 
@@ -570,25 +620,20 @@ where
                     let empty: IntoStream<V> = Box::pin(stream::empty());
                     return empty;
                 } else if l == children.len() {
-                    into_stream_forward(dir, collator, range, children[l - 1])
+                    keys_forward(dir, collator, range, children[l - 1])
                 } else if l == r || l + 1 == r {
-                    into_stream_forward(dir, collator, range, children[l])
+                    keys_forward(dir, collator, range, children[l])
                 } else {
-                    let left = into_stream_forward(
-                        dir.clone(),
-                        collator.clone(),
-                        range.clone(),
-                        children[l],
-                    );
+                    let left =
+                        keys_forward(dir.clone(), collator.clone(), range.clone(), children[l]);
 
-                    let right =
-                        into_stream_forward(dir.clone(), collator.clone(), range, children[r - 1]);
+                    let right = keys_forward(dir.clone(), collator.clone(), range, children[r - 1]);
 
                     let default_range = Arc::new(Range::default());
 
                     let middle = stream::iter(children[(l + 1)..(r - 1)].to_vec())
                         .map(move |node_id| {
-                            into_stream_forward(
+                            keys_forward(
                                 dir.clone(),
                                 collator.clone(),
                                 default_range.clone(),
@@ -608,7 +653,7 @@ where
     Box::pin(stream::once(fut).try_flatten())
 }
 
-fn into_stream_reverse<C, V, FE, G>(
+fn keys_reverse<C, V, FE, G>(
     dir: Arc<G>,
     collator: Arc<Collator<C>>,
     range: Arc<Range<V>>,
@@ -648,7 +693,7 @@ where
                 let children = children.iter().rev().copied().collect::<Vec<_>>();
                 let keys = stream::iter(children)
                     .map(move |node_id| {
-                        into_stream_reverse(dir.clone(), collator.clone(), range.clone(), node_id)
+                        keys_reverse(dir.clone(), collator.clone(), range.clone(), node_id)
                     })
                     .flatten();
 
@@ -662,19 +707,14 @@ where
                     let empty: IntoStream<V> = Box::pin(stream::empty());
                     return empty;
                 } else if l == children.len() {
-                    into_stream_reverse(dir, collator, range, children[l - 1])
+                    keys_reverse(dir, collator, range, children[l - 1])
                 } else if l == r || l + 1 == r {
-                    into_stream_reverse(dir, collator, range, children[l])
+                    keys_reverse(dir, collator, range, children[l])
                 } else {
-                    let left = into_stream_reverse(
-                        dir.clone(),
-                        collator.clone(),
-                        range.clone(),
-                        children[l],
-                    );
+                    let left =
+                        keys_reverse(dir.clone(), collator.clone(), range.clone(), children[l]);
 
-                    let right =
-                        into_stream_reverse(dir.clone(), collator.clone(), range, children[r - 1]);
+                    let right = keys_reverse(dir.clone(), collator.clone(), range, children[r - 1]);
 
                     let default_range = Arc::new(Range::default());
 
@@ -685,7 +725,7 @@ where
                         .collect::<Vec<_>>();
                     let middle = stream::iter(middle_children)
                         .map(move |node_id| {
-                            into_stream_reverse(
+                            keys_reverse(
                                 dir.clone(),
                                 collator.clone(),
                                 default_range.clone(),
@@ -1349,7 +1389,7 @@ where
         validate_collator_eq(&self.collator, &other.collator)?;
         validate_schema_eq(&self.schema, &other.schema)?;
 
-        let mut keys = other.into_stream(Range::default(), false);
+        let mut keys = other.keys(Range::default(), false);
         while let Some(key) = keys.try_next().await? {
             self.insert_root(key).await?;
         }
@@ -1364,7 +1404,7 @@ where
         validate_collator_eq(&self.collator, &other.collator)?;
         validate_schema_eq(&self.schema, &other.schema)?;
 
-        let mut keys = other.into_stream(Range::default(), false);
+        let mut keys = other.keys(Range::default(), false);
         while let Some(key) = keys.try_next().await? {
             self.delete(key).await?;
         }

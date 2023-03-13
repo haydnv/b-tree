@@ -177,14 +177,14 @@ async fn functional_test() -> Result<(), io::Error> {
         }
 
         let mut i = 1;
-        let mut keys = view.into_stream(Range::with_range(vec![], 0..123), false);
+        let mut keys = view.keys(Range::with_range(vec![], 0..123), false);
         while let Some(key) = keys.try_next().await? {
             assert_eq!(key[0], i);
             i += 1;
         }
 
         let view = btree.read().await;
-        let mut keys = view.into_stream(Range::with_range(vec![], 123..n), false);
+        let mut keys = view.keys(Range::with_range(vec![], 123..n), false);
         while let Some(key) = keys.try_next().await? {
             assert_eq!(key[0], i);
             i += 1;
@@ -217,7 +217,7 @@ async fn functional_test() -> Result<(), io::Error> {
         }
 
         let mut i = n - 1;
-        let mut reversed = view.into_stream(Range::default(), true);
+        let mut reversed = view.keys(Range::default(), true);
         while let Some(key) = reversed.try_next().await? {
             assert_eq!(key[0], i);
             i -= 1;
@@ -250,10 +250,7 @@ async fn functional_test() -> Result<(), io::Error> {
             assert_eq!(view.count(&Range::default()).await?, count);
         }
 
-        assert_eq!(
-            view.into_stream(Range::default(), false).try_next().await?,
-            None
-        );
+        assert_eq!(view.keys(Range::default(), false).try_next().await?, None);
     }
 
     // clean up
