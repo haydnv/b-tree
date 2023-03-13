@@ -820,7 +820,7 @@ where
         &'a mut self,
         mut node: FileWriteGuardOwned<FE, Node<S::Value>>,
         key: &'a Key<S::Value>,
-    ) -> Pin<Box<dyn Future<Output = Result<Delete<FE, S::Value>, io::Error>> + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Delete<FE, S::Value>, io::Error>> + Send + 'a>> {
         Box::pin(async move {
             match &mut *node {
                 Node::Leaf(keys) => {
@@ -891,7 +891,7 @@ where
         i: usize,
         bounds: &'a mut Vec<Key<S::Value>>,
         children: &'a mut Vec<Uuid>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send + 'a>> {
         Box::pin(async move {
             if i == 0 {
                 match self
@@ -934,7 +934,8 @@ where
         left_bounds: &'a mut Vec<Key<S::Value>>,
         left_children: &'a mut Vec<Uuid>,
         node_id: &'a Uuid,
-    ) -> Pin<Box<dyn Future<Output = Result<MergeIndexLeft<S::Value>, io::Error>> + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<MergeIndexLeft<S::Value>, io::Error>> + Send + 'a>>
+    {
         Box::pin(async move {
             let mut node = self.dir.write_file(node_id).await?;
 
@@ -971,7 +972,7 @@ where
         right_bounds: &'a mut Vec<Key<S::Value>>,
         right_children: &'a mut Vec<Uuid>,
         node_id: &'a Uuid,
-    ) -> Pin<Box<dyn Future<Output = Result<MergeIndexRight, io::Error>> + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<MergeIndexRight, io::Error>> + Send + 'a>> {
         Box::pin(async move {
             let mut node = self.dir.write_file(node_id).await?;
 
@@ -1002,7 +1003,7 @@ where
         i: usize,
         bounds: &'a mut Vec<Key<S::Value>>,
         children: &'a mut Vec<Uuid>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send + 'a>> {
         Box::pin(async move {
             if i == 0 {
                 match self.merge_leaf_left(new_keys, &children[i + 1]).await? {
@@ -1038,7 +1039,7 @@ where
         &'a self,
         left_keys: &'a mut Vec<Key<S::Value>>,
         node_id: &'a Uuid,
-    ) -> Pin<Box<dyn Future<Output = Result<MergeLeafLeft<S::Value>, io::Error>> + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<MergeLeafLeft<S::Value>, io::Error>> + Send + 'a>> {
         Box::pin(async move {
             let mut node = self.dir.write_file(node_id).await?;
 
@@ -1076,7 +1077,7 @@ where
         &'a self,
         right_keys: &'a mut Vec<Key<S::Value>>,
         node_id: &'a Uuid,
-    ) -> Pin<Box<dyn Future<Output = Result<MergeLeafRight, io::Error>> + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<MergeLeafRight, io::Error>> + Send + 'a>> {
         Box::pin(async move {
             let mut node = self.dir.write_file(node_id).await?;
 
