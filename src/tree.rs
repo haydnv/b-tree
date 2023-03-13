@@ -785,6 +785,17 @@ enum Insert<V> {
     Overflow(Key<V>, Uuid),
 }
 
+impl<S, C, FE> BTree<S, C, DirWriteGuardOwned<FE>> {
+    /// Downgrade this [`BTreeWriteGuard`] into a [`BTreeReadGuard`].
+    pub fn downgrade(self) -> BTreeReadGuard<S, C, FE> {
+        BTreeReadGuard {
+            schema: self.schema,
+            collator: self.collator,
+            dir: self.dir.downgrade(),
+        }
+    }
+}
+
 impl<S, C, FE> BTree<S, C, DirWriteGuardOwned<FE>>
 where
     S: Schema + Send + Sync,
@@ -1370,13 +1381,14 @@ where
         })
     }
 
-    /// Downgrade this [`BTreeWriteGuard`] into a [`BTreeReadGuard`].
-    pub fn downgrade(self) -> BTreeReadGuard<S, C, FE> {
-        BTreeReadGuard {
-            schema: self.schema,
-            collator: self.collator,
-            dir: self.dir.downgrade(),
-        }
+    /// Delete all the keys in this [`BTree`].
+    pub async fn truncate(&mut self) -> Result<(), io::Error> {
+        self.dir.truncate().await;
+
+        self.dir
+            .create_file(ROOT.to_string(), Node::Leaf(vec![]), 0)?;
+
+        Ok(())
     }
 }
 
