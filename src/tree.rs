@@ -48,6 +48,11 @@ impl<S, C, FE> Clone for BTreeLock<S, C, FE> {
 }
 
 impl<S, C, FE> BTreeLock<S, C, FE> {
+    /// Borrow the [`Collator`] used by this B+Tree.
+    pub fn collator(&self) -> &Arc<Collator<C>> {
+        &self.collator
+    }
+
     /// Borrow the schema of the source B+Tree.
     pub fn schema(&self) -> &S {
         &self.schema
@@ -125,7 +130,7 @@ where
     }
 }
 
-type IntoStream<V> = Pin<Box<dyn Stream<Item = Result<Key<V>, io::Error>>>>;
+type IntoStream<V> = Pin<Box<dyn Stream<Item = Result<Key<V>, io::Error>> + Send>>;
 
 type ToStream<'a, FE, V> =
     Pin<Box<dyn Stream<Item = Result<FileReadGuardOwned<FE, [Key<V>]>, io::Error>> + 'a>>;
@@ -140,9 +145,9 @@ pub struct BTree<S, C, G> {
 impl<S, C, FE, G> BTree<S, C, G>
 where
     S: Schema,
-    C: Collate<Value = S::Value> + 'static,
-    FE: AsType<Node<S::Value>> + Send + Sync + 'static,
-    G: Deref<Target = Dir<FE>> + 'static,
+    C: Collate<Value = S::Value>,
+    FE: AsType<Node<S::Value>> + Send + Sync,
+    G: Deref<Target = Dir<FE>>,
     Node<S::Value>: FileLoad + fmt::Debug,
 {
     /// Borrow the [`Schema`] of this [`BTree`].
@@ -310,7 +315,9 @@ where
     pub fn to_stream<'a>(
         &'a self,
         range: &'a Range<S::Value>,
-    ) -> impl Stream<Item = Result<FileReadGuardOwned<FE, [Key<S::Value>]>, io::Error>> + Sized + 'a
+    ) -> impl Stream<Item = Result<FileReadGuardOwned<FE, [Key<S::Value>]>, io::Error>> + 'a
+    where
+        FE: 'a,
     {
         let range = if range.is_default() {
             None
@@ -325,7 +332,10 @@ where
         &'a self,
         range: Option<&'a Range<S::Value>>,
         node_id: Uuid,
-    ) -> ToStream<'a, FE, S::Value> {
+    ) -> ToStream<'a, FE, S::Value>
+    where
+        FE: 'a,
+    {
         let file = self.dir.get_file(&node_id).expect("node").clone();
         let fut = file.into_read().map_ok(move |node| {
             let keys: ToStream<FE, S::Value> = {
@@ -381,19 +391,6 @@ where
         Box::pin(stream::once(fut).try_flatten())
     }
 
-    /// Copy all the keys in the given `range` of this B+Tree.
-    pub fn into_stream(
-        self,
-        range: Range<S::Value>,
-        reverse: bool,
-    ) -> impl Stream<Item = Result<Key<S::Value>, io::Error>> + Sized {
-        if reverse {
-            into_stream_reverse(Arc::new(self.dir), self.collator, Arc::new(range), ROOT)
-        } else {
-            into_stream_forward(Arc::new(self.dir), self.collator, Arc::new(range), ROOT)
-        }
-    }
-
     #[cfg(debug_assertions)]
     pub async fn is_valid(&self) -> Result<bool, io::Error> {
         {
@@ -431,11 +428,6 @@ where
         }
 
         assert_eq!(count, contents.len());
-        // assert!(
-        //     self.collator.is_sorted(&contents),
-        //     "not sorted: {:?}",
-        //     contents
-        // );
 
         Ok(true)
     }
@@ -478,6 +470,28 @@ where
     }
 }
 
+impl<S, C, FE, G> BTree<S, C, G>
+where
+    S: Schema,
+    C: Collate<Value = S::Value> + Send + Sync + 'static,
+    FE: AsType<Node<S::Value>> + Send + Sync + 'static,
+    G: Deref<Target = Dir<FE>> + Send + Sync + 'static,
+    Node<S::Value>: FileLoad + fmt::Debug,
+{
+    /// Copy all the keys in the given `range` of this B+Tree.
+    pub fn into_stream(
+        self,
+        range: Range<S::Value>,
+        reverse: bool,
+    ) -> impl Stream<Item = Result<Key<S::Value>, io::Error>> + Unpin + Send + Sized {
+        if reverse {
+            into_stream_reverse(Arc::new(self.dir), self.collator, Arc::new(range), ROOT)
+        } else {
+            into_stream_forward(Arc::new(self.dir), self.collator, Arc::new(range), ROOT)
+        }
+    }
+}
+
 fn into_stream_forward<C, V, FE, G>(
     dir: Arc<G>,
     collator: Arc<Collator<C>>,
@@ -485,10 +499,10 @@ fn into_stream_forward<C, V, FE, G>(
     node_id: Uuid,
 ) -> IntoStream<V>
 where
-    C: Collate<Value = V> + 'static,
-    V: Clone + PartialEq + fmt::Debug + 'static,
+    C: Collate<Value = V> + Send + Sync + 'static,
+    V: Clone + PartialEq + fmt::Debug + Send + Sync + 'static,
     FE: AsType<Node<V>> + Send + Sync + 'static,
-    G: Deref<Target = Dir<FE>> + 'static,
+    G: Deref<Target = Dir<FE>> + Send + Sync + 'static,
     Node<V>: FileLoad,
 {
     let file = dir.get_file(&node_id).expect("node").clone();
@@ -575,10 +589,10 @@ fn into_stream_reverse<C, V, FE, G>(
     node_id: Uuid,
 ) -> IntoStream<V>
 where
-    C: Collate<Value = V> + 'static,
+    C: Collate<Value = V> + Send + Sync + 'static,
     V: Clone + PartialEq + fmt::Debug + Send + Sync + 'static,
     FE: AsType<Node<V>> + Send + Sync + 'static,
-    G: Deref<Target = Dir<FE>> + 'static,
+    G: Deref<Target = Dir<FE>> + Send + Sync + 'static,
     Node<V>: FileLoad,
 {
     let file = dir.get_file(&node_id).expect("node").clone();
@@ -703,8 +717,8 @@ enum Insert<V> {
 impl<S, C, FE> BTree<S, C, DirWriteGuardOwned<FE>>
 where
     S: Schema,
-    C: Collate<Value = S::Value> + 'static,
-    FE: AsType<Node<S::Value>> + Send + Sync + 'static,
+    C: Collate<Value = S::Value>,
+    FE: AsType<Node<S::Value>> + Send + Sync,
     Node<S::Value>: FileLoad,
 {
     /// Delete the given `key` from this B+Tree.
@@ -1284,6 +1298,23 @@ where
         })
     }
 
+    /// Downgrade this [`BTreeWriteGuard`] into a [`BTreeReadGuard`].
+    pub fn downgrade(self) -> BTreeReadGuard<S, C, FE> {
+        BTreeReadGuard {
+            schema: self.schema,
+            collator: self.collator,
+            dir: self.dir.downgrade(),
+        }
+    }
+}
+
+impl<S, C, FE> BTree<S, C, DirWriteGuardOwned<FE>>
+where
+    S: Schema,
+    C: Collate<Value = S::Value> + Send + Sync + 'static,
+    FE: AsType<Node<S::Value>> + Send + Sync + 'static,
+    Node<S::Value>: FileLoad,
+{
     /// Merge the keys in the `other` B+Tree range into this one.
     ///
     /// The source B+Tree **must** have an identical schema and collation.
@@ -1313,15 +1344,6 @@ where
         }
 
         Ok(())
-    }
-
-    /// Downgrade this [`BTreeWriteGuard`] into a [`BTreeReadGuard`].
-    pub fn downgrade(self) -> BTreeReadGuard<S, C, FE> {
-        BTreeReadGuard {
-            schema: self.schema,
-            collator: self.collator,
-            dir: self.dir.downgrade(),
-        }
     }
 }
 

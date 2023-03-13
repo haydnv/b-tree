@@ -19,6 +19,7 @@ pub use tree::{BTree, BTreeLock, BTreeReadGuard, BTreeWriteGuard};
 pub type Key<V> = Vec<V>;
 
 /// A collator used by a B+Tree
+#[derive(Copy, Clone)]
 pub struct Collator<C> {
     value: C,
 }
@@ -27,6 +28,11 @@ impl<C> Collator<C> {
     /// Construct a new [`Collator`] for a B+Tree from an existing `value` collator.
     pub fn new(value: C) -> Self {
         Self { value }
+    }
+
+    /// Borrow the value collator used by this key [`Collator`].
+    pub fn inner(&self) -> &C {
+        &self.value
     }
 }
 

@@ -46,6 +46,19 @@ impl<V> Range<V> {
         }
     }
 
+    /// Destructure this [`Range`] into a prefix and [`Bound`]s.
+    pub fn into_inner(self) -> (Vec<V>, (Bound<V>, Bound<V>)) {
+        (self.prefix, (self.start, self.end))
+    }
+
+    /// Return `false` if this [`Range`] has only a prefix.
+    pub fn has_bounds(&self) -> bool {
+        match (&self.start, &self.end) {
+            (Bound::Unbounded, Bound::Unbounded) => false,
+            _ => true,
+        }
+    }
+
     /// Return `true` if this [`Range`] is empty.
     pub fn is_default(&self) -> bool {
         if self.prefix.is_empty() {
@@ -55,6 +68,15 @@ impl<V> Range<V> {
             }
         } else {
             false
+        }
+    }
+
+    /// Return the number of columns specified by this [`Range`].
+    pub fn len(&self) -> usize {
+        if self.has_bounds() {
+            self.prefix.len() + 1
+        } else {
+            self.prefix.len()
         }
     }
 }
