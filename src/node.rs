@@ -6,11 +6,14 @@ use async_trait::async_trait;
 use collate::{Collate, Overlap, OverlapsValue};
 #[cfg(feature = "stream")]
 use destream::{de, en};
+use get_size::GetSize;
 use uuid::Uuid;
 
 use super::range::Range;
 use super::Collator;
 use super::Key;
+
+const UUID_SIZE: usize = 16;
 
 /// An ordered set of keys in a [`Node`].
 pub trait Block<V> {
@@ -124,6 +127,7 @@ impl<V: fmt::Debug> Block<V> for Vec<Key<V>> {
 }
 
 /// A node in a B+Tree
+#[derive(Clone)]
 pub enum Node<N> {
     Index(N, Vec<Uuid>),
     Leaf(N),
@@ -135,6 +139,15 @@ impl<N> Node<N> {
         match self {
             Self::Leaf(_) => true,
             _ => false,
+        }
+    }
+}
+
+impl<N: GetSize> GetSize for Node<N> {
+    fn get_size(&self) -> usize {
+        match self {
+            Self::Index(keys, children) => keys.get_size() + (children.len() * UUID_SIZE),
+            Self::Leaf(leaf) => leaf.get_size(),
         }
     }
 }

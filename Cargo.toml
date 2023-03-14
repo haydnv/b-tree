@@ -22,6 +22,7 @@ collate = { path = "../collate" }
 destream = { path = "../destream", optional = true }
 freqfs = { path = "../freqfs" }
 futures = "0.3"
+get-size = "0.1"
 num_cpus = "1.15"
 pin-project = "1.0"
 safecast = { path = "../safecast" }
