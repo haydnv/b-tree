@@ -242,6 +242,7 @@ where
             match &*node {
                 Node::Leaf(keys) => {
                     let i = keys.bisect_left(&key, &*self.collator);
+
                     break Ok(if i < keys.len() {
                         match keys.get(i) {
                             Some(present) => present == key,
@@ -253,6 +254,7 @@ where
                 }
                 Node::Index(bounds, children) => {
                     let i = bounds.bisect_right(key, &*self.collator);
+
                     if i == 0 {
                         return Ok(false);
                     } else {
@@ -1469,12 +1471,9 @@ where
         validate_collator_eq(&self.collator, &other.collator)?;
         validate_schema_eq(&self.schema, &other.schema)?;
 
-        let range = Range::default();
-        let mut nodes = other.nodes(&range);
-        while let Some(node) = nodes.try_next().await? {
-            for key in &*node {
-                self.delete(key).await?;
-            }
+        let mut keys = other.keys(Range::default(), false);
+        while let Some(key) = keys.try_next().await? {
+            self.delete(&key).await?;
         }
 
         Ok(())
