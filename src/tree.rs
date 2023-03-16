@@ -337,32 +337,82 @@ where
         })
     }
 
-    /// Return the first key in this B+Tree, if any.
-    pub async fn first(&self) -> Result<Option<Key<S::Value>>, io::Error> {
+    /// Return the first key in this B+Tree with the given prefix, if any.
+    pub async fn first(&self, prefix: &Key<S::Value>) -> Result<Option<Key<S::Value>>, io::Error> {
         let mut node = self.dir.read_file(&ROOT).await?;
 
-        loop {
-            match &*node {
-                Node::Leaf(keys) => return Ok(keys.first().cloned()),
-                Node::Index(_bounds, children) => {
-                    node = self.dir.read_file(&children[0]).await?;
-                }
+        if let Node::Leaf(keys) = &*node {
+            if keys.is_empty() {
+                return Ok(None);
             }
         }
+
+        Ok(loop {
+            match &*node {
+                Node::Leaf(keys) => {
+                    let i = keys.bisect_left(prefix, &*self.collator);
+
+                    break if i == keys.len() {
+                        None
+                    } else if keys[i].starts_with(prefix) {
+                        Some(keys[i].clone())
+                    } else {
+                        None
+                    };
+                }
+                Node::Index(bounds, children) => {
+                    let i = bounds.bisect_left(prefix, &*self.collator);
+
+                    if i == bounds.len() {
+                        node = self.dir.read_file(children.last().expect("last")).await?;
+                    } else if bounds[i].starts_with(prefix) {
+                        break Some(bounds[i].clone());
+                    } else {
+                        node = self.dir.read_file(&children[i]).await?;
+                    }
+                }
+            }
+        })
     }
 
-    /// Return the last key in this B+Tree, if any.
-    pub async fn last(&self) -> Result<Option<Key<S::Value>>, io::Error> {
+    /// Return the last key in this B+Tree with the given `prefix`, if any.
+    pub async fn last(&self, prefix: &Key<S::Value>) -> Result<Option<Key<S::Value>>, io::Error> {
         let mut node = self.dir.read_file(&ROOT).await?;
 
-        loop {
-            match &*node {
-                Node::Leaf(keys) => return Ok(keys.last().cloned()),
-                Node::Index(_bounds, children) => {
-                    node = self.dir.read_file(children.last().expect("last")).await?;
-                }
+        if let Node::Leaf(keys) = &*node {
+            if keys.is_empty() {
+                return Ok(None);
             }
         }
+
+        Ok(loop {
+            match &*node {
+                Node::Leaf(keys) => {
+                    let i = keys.bisect_right(prefix, &*self.collator);
+
+                    break if i == keys.len() {
+                        if keys[i - 1].starts_with(prefix) {
+                            Some(keys[i - 1].clone())
+                        } else {
+                            None
+                        }
+                    } else if keys[i].starts_with(prefix) {
+                        Some(keys[i].clone())
+                    } else {
+                        None
+                    };
+                }
+                Node::Index(bounds, children) => {
+                    let i = bounds.bisect_right(prefix, &*self.collator);
+
+                    if i == 0 {
+                        break None;
+                    } else {
+                        node = self.dir.read_file(&children[i - 1]).await?;
+                    }
+                }
+            }
+        })
     }
 
     /// Return `true` if the given `range` of this B+Tree contains zero keys.
@@ -391,7 +441,7 @@ where
     }
 
     /// Borrow all the keys in the given `range` of this B+Tree.
-    pub fn to_stream<'a>(
+    pub fn nodes<'a>(
         &'a self,
         range: &'a Range<S::Value>,
     ) -> impl Stream<Item = Result<FileReadGuardOwned<FE, [Key<S::Value>]>, io::Error>> + 'a
@@ -404,10 +454,10 @@ where
             Some(range)
         };
 
-        self.to_stream_inner(range, ROOT)
+        self.nodes_inner(range, ROOT)
     }
 
-    fn to_stream_inner<'a>(
+    fn nodes_inner<'a>(
         &'a self,
         range: Option<&'a Range<S::Value>>,
         node_id: Uuid,
@@ -458,7 +508,7 @@ where
 
                     let keys = children
                         .into_iter()
-                        .map(move |node_id| self.to_stream_inner(range, node_id));
+                        .map(move |node_id| self.nodes_inner(range, node_id));
 
                     Box::pin(stream::iter(keys).flatten())
                 }
@@ -501,7 +551,7 @@ where
         let range = Range::default();
         let count = self.count(&range).await? as usize;
         let mut contents = Vec::with_capacity(count);
-        let mut stream = self.to_stream(&range);
+        let mut stream = self.nodes(&range);
         while let Some(leaf) = stream.try_next().await? {
             contents.extend_from_slice(&*leaf);
         }
@@ -804,15 +854,13 @@ where
     Node<S::Value>: FileLoad,
 {
     /// Delete the given `key` from this B+Tree.
-    pub async fn delete(&mut self, key: Key<S::Value>) -> Result<bool, S::Error> {
-        let key = self.schema.validate(key)?;
-
+    pub async fn delete(&mut self, key: &Key<S::Value>) -> Result<bool, S::Error> {
         let mut root = self.dir.write_file_owned(&ROOT).await?;
 
         let new_root = match &mut *root {
             Node::Leaf(keys) => {
                 let i = keys.bisect_left(&key, &*self.collator);
-                if i < keys.len() && &keys[i] == &key {
+                if i < keys.len() && &keys[i] == key {
                     keys.remove(i);
                     return Ok(true);
                 } else {
@@ -1421,9 +1469,12 @@ where
         validate_collator_eq(&self.collator, &other.collator)?;
         validate_schema_eq(&self.schema, &other.schema)?;
 
-        let mut keys = other.keys(Range::default(), false);
-        while let Some(key) = keys.try_next().await? {
-            self.delete(key).await?;
+        let range = Range::default();
+        let mut nodes = other.nodes(&range);
+        while let Some(node) = nodes.try_next().await? {
+            for key in &*node {
+                self.delete(key).await?;
+            }
         }
 
         Ok(())

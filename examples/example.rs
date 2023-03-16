@@ -156,7 +156,7 @@ async fn functional_test() -> Result<(), io::Error> {
 
         {
             let range = Range::with_range(vec![], 0..67);
-            let mut nodes = view.to_stream(&range);
+            let mut nodes = view.nodes(&range);
             while let Some(node) = nodes.try_next().await? {
                 for key in &*node {
                     assert_eq!(key[0], i);
@@ -167,7 +167,7 @@ async fn functional_test() -> Result<(), io::Error> {
 
         {
             let range = Range::with_range(vec![], 67..250);
-            let mut nodes = view.to_stream(&range);
+            let mut nodes = view.nodes(&range);
             while let Some(node) = nodes.try_next().await? {
                 for key in &*node {
                     assert_eq!(key[0], i);
@@ -230,15 +230,15 @@ async fn functional_test() -> Result<(), io::Error> {
         assert!(!view.is_empty(&Range::default()).await?);
 
         while !view.is_empty(&Range::default()).await? {
-            let lo = view.first().await?.expect("first")[0];
-            let hi = view.last().await?.expect("last")[0];
+            let lo = view.first(&vec![]).await?.expect("first")[0];
+            let hi = view.last(&vec![]).await?.expect("last")[0];
 
             let i = rand::thread_rng().gen_range(lo..(hi + 1));
             let key = vec![i, i16::MAX - i, i16::MAX - 2 * i];
 
             let present = view.contains(&key).await?;
 
-            assert_eq!(present, view.delete(key.to_vec()).await?);
+            assert_eq!(present, view.delete(&key).await?);
             assert!(!view.contains(&key).await?);
 
             if present {
@@ -294,13 +294,13 @@ async fn load_test() -> Result<(), io::Error> {
 
             let i: i16 = rand::thread_rng().gen_range(i16::MIN..i16::MAX);
             let key = vec![i, i / 2, i % 2];
-            view.delete(key).await?;
+            view.delete(&key).await?;
         }
 
         for _ in 0..(n / 2) {
             let i: i16 = rand::thread_rng().gen_range(i16::MIN..i16::MAX);
             let key = vec![i, i / 2, i % 2];
-            view.delete(key).await?;
+            view.delete(&key).await?;
         }
     }
 
@@ -321,7 +321,7 @@ async fn count_keys(
 ) -> Result<u64, io::Error> {
     let mut count = 0u64;
 
-    let mut leaves = view.to_stream(range);
+    let mut leaves = view.nodes(range);
     while let Some(leaf) = leaves.try_next().await? {
         count += leaf.len() as u64;
     }
