@@ -82,5 +82,5 @@ pub trait Schema: Eq + fmt::Debug {
     fn order(&self) -> usize;
 
     /// Return a validated version of the given `key`, or a validation error.
-    fn validate(&self, key: Vec<Self::Value>) -> Result<Vec<Self::Value>, Self::Error>;
+    fn validate(&self, key: Key<Self::Value>) -> Result<Key<Self::Value>, Self::Error>;
 }

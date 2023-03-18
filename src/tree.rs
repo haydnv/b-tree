@@ -638,8 +638,14 @@ where
     G: Deref<Target = Dir<FE>> + Send + Sync + 'static,
     Node<V>: FileLoad,
 {
+    #[cfg(feature = "logging")]
+    log::debug!("reading BTree keys in forward order");
+
     let file = dir.get_file(&node_id).expect("node").clone();
     let fut = file.into_read().map_ok(move |node| {
+        #[cfg(feature = "logging")]
+        log::debug!("locked node for reading");
+
         let keys: IntoStream<V> = match &*node {
             Node::Leaf(keys) if range.is_default() => {
                 let keys = stream::iter(keys.to_vec().into_iter().map(Ok));
@@ -663,6 +669,9 @@ where
             Node::Index(_bounds, children) if range.is_default() => {
                 let keys = stream::iter(children.to_vec())
                     .map(move |node_id| {
+                        #[cfg(feature = "logging")]
+                        log::debug!("reading keys from child node...");
+
                         keys_forward(dir.clone(), collator.clone(), range.clone(), node_id)
                     })
                     .flatten();
@@ -677,10 +686,19 @@ where
                     let empty: IntoStream<V> = Box::pin(stream::empty());
                     return empty;
                 } else if l == children.len() {
+                    #[cfg(feature = "logging")]
+                    log::debug!("reading keys from child node {}...", l - 1);
+
                     keys_forward(dir, collator, range, children[l - 1])
                 } else if l == r || l + 1 == r {
+                    #[cfg(feature = "logging")]
+                    log::debug!("reading keys from child node {}...", l);
+
                     keys_forward(dir, collator, range, children[l])
                 } else {
+                    #[cfg(feature = "logging")]
+                    log::debug!("reading keys from child nodes {}..{}", l, r);
+
                     let left =
                         keys_forward(dir.clone(), collator.clone(), range.clone(), children[l]);
 
@@ -1452,7 +1470,10 @@ where
     /// Merge the keys from the `other` B+Tree range into this one.
     ///
     /// The source B+Tree **must** have an identical schema and collation.
-    pub async fn merge(&mut self, other: BTreeReadGuard<S, C, FE>) -> Result<(), S::Error> {
+    pub async fn merge<G>(&mut self, other: BTree<S, C, G>) -> Result<(), S::Error>
+    where
+        G: Deref<Target = Dir<FE>> + Send + Sync + 'static,
+    {
         validate_collator_eq(&self.collator, &other.collator)?;
         validate_schema_eq(&self.schema, &other.schema)?;
 
@@ -1467,7 +1488,10 @@ where
     /// Delete the keys in the `other` B+Tree from this one.
     ///
     /// The source B+Tree **must** have an identical schema and collation.
-    pub async fn delete_all(&mut self, other: BTreeReadGuard<S, C, FE>) -> Result<(), S::Error> {
+    pub async fn delete_all<G>(&mut self, other: BTree<S, C, G>) -> Result<(), S::Error>
+    where
+        G: Deref<Target = Dir<FE>> + Send + Sync + 'static,
+    {
         validate_collator_eq(&self.collator, &other.collator)?;
         validate_schema_eq(&self.schema, &other.schema)?;
 
