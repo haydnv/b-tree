@@ -339,8 +339,8 @@ where
         })
     }
 
-    /// Return the first key in this B+Tree with the given prefix, if any.
-    pub async fn first(&self, prefix: &Key<S::Value>) -> Result<Option<Key<S::Value>>, io::Error> {
+    /// Return the first key in this B+Tree within the given `range`, if any.
+    pub async fn first(&self, range: &Range<S::Value>) -> Result<Option<Key<S::Value>>, io::Error> {
         let mut node = self.dir.read_file(&ROOT).await?;
 
         if let Node::Leaf(keys) = &*node {
@@ -352,25 +352,25 @@ where
         Ok(loop {
             match &*node {
                 Node::Leaf(keys) => {
-                    let i = keys.bisect_left(prefix, &*self.collator);
+                    let (l, _r) = keys.bisect(range, &self.collator);
 
-                    break if i == keys.len() {
+                    break if l == keys.len() {
                         None
-                    } else if keys[i].starts_with(prefix) {
-                        Some(keys[i].clone())
+                    } else if range.contains_value(&keys[l], &self.collator) {
+                        Some(keys[l].clone())
                     } else {
                         None
                     };
                 }
                 Node::Index(bounds, children) => {
-                    let i = bounds.bisect_left(prefix, &*self.collator);
+                    let (l, _r) = bounds.bisect(range, &self.collator);
 
-                    if i == bounds.len() {
+                    if l == bounds.len() {
                         node = self.dir.read_file(children.last().expect("last")).await?;
-                    } else if bounds[i].starts_with(prefix) {
-                        break Some(bounds[i].clone());
+                    } else if range.contains_value(&bounds[l], &self.collator) {
+                        break Some(bounds[l].clone());
                     } else {
-                        node = self.dir.read_file(&children[i]).await?;
+                        node = self.dir.read_file(&children[l]).await?;
                     }
                 }
             }
@@ -378,7 +378,7 @@ where
     }
 
     /// Return the last key in this B+Tree with the given `prefix`, if any.
-    pub async fn last(&self, prefix: &Key<S::Value>) -> Result<Option<Key<S::Value>>, io::Error> {
+    pub async fn last(&self, range: &Range<S::Value>) -> Result<Option<Key<S::Value>>, io::Error> {
         let mut node = self.dir.read_file(&ROOT).await?;
 
         if let Node::Leaf(keys) = &*node {
@@ -390,27 +390,27 @@ where
         Ok(loop {
             match &*node {
                 Node::Leaf(keys) => {
-                    let i = keys.bisect_right(prefix, &*self.collator);
+                    let (_l, r) = keys.bisect(range, &self.collator);
 
-                    break if i == keys.len() {
-                        if keys[i - 1].starts_with(prefix) {
-                            Some(keys[i - 1].clone())
+                    break if r == keys.len() {
+                        if range.contains_value(&keys[r - 1], &self.collator) {
+                            Some(keys[r - 1].clone())
                         } else {
                             None
                         }
-                    } else if keys[i].starts_with(prefix) {
-                        Some(keys[i].clone())
+                    } else if range.contains_value(&keys[r], &self.collator) {
+                        Some(keys[r].clone())
                     } else {
                         None
                     };
                 }
                 Node::Index(bounds, children) => {
-                    let i = bounds.bisect_right(prefix, &*self.collator);
+                    let (_l, r) = bounds.bisect(range, &self.collator);
 
-                    if i == 0 {
+                    if r == 0 {
                         break None;
                     } else {
-                        node = self.dir.read_file(&children[i - 1]).await?;
+                        node = self.dir.read_file(&children[r - 1]).await?;
                     }
                 }
             }

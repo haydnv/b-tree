@@ -230,8 +230,8 @@ async fn functional_test() -> Result<(), io::Error> {
         assert!(!view.is_empty(&Range::default()).await?);
 
         while !view.is_empty(&Range::default()).await? {
-            let lo = view.first(&vec![]).await?.expect("first")[0];
-            let hi = view.last(&vec![]).await?.expect("last")[0];
+            let lo = view.first(&Range::default()).await?.expect("first")[0];
+            let hi = view.last(&Range::default()).await?.expect("last")[0];
 
             let i = rand::thread_rng().gen_range(lo..(hi + 1));
             let key = vec![i, i16::MAX - i, i16::MAX - 2 * i];
