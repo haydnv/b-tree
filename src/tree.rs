@@ -221,6 +221,17 @@ pub struct BTree<S, C, G> {
     dir: G,
 }
 
+impl<S, C, G> BTree<S, C, G>
+where
+    S: Schema,
+    C: Collate<Value = S::Value>,
+{
+    /// Borrow the [`Schema`] of this [`BTree`].
+    pub fn schema(&self) -> &S {
+        &self.schema
+    }
+}
+
 impl<S, C, FE, G> BTree<S, C, G>
 where
     S: Schema,
@@ -229,11 +240,6 @@ where
     G: Deref<Target = Dir<FE>>,
     Node<S::Value>: FileLoad + fmt::Debug,
 {
-    /// Borrow the [`Schema`] of this [`BTree`].
-    pub fn schema(&self) -> &S {
-        &self.schema
-    }
-
     /// Return `true` if this B+Tree contains the given `key`.
     pub async fn contains(&self, key: &Key<S::Value>) -> Result<bool, io::Error> {
         let mut node = self.dir.read_file(&ROOT).await?;
