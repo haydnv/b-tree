@@ -11,7 +11,7 @@ use rand::Rng;
 use safecast::as_type;
 use tokio::fs;
 
-use b_tree::{BTreeLock, BTreeReadGuard, Key, Node, Range, Schema};
+use b_tree::{BTreeLock, Key, Node, Range, Schema};
 
 const BLOCK_SIZE: usize = 4_096;
 
@@ -117,13 +117,13 @@ async fn functional_test() -> Result<(), io::Error> {
     // create a new B+ tree
     let btree = BTreeLock::create(schema, Collator::<i16>::default(), dir)?;
 
+    let n = 300;
+
     {
         let mut view = btree.write().await;
 
         assert!(view.is_empty(&Range::default()).await?);
         assert_eq!(view.count(&Range::default()).await?, 0);
-
-        let n = 300;
 
         for i in 1..n {
             let lo = i;
@@ -151,39 +151,38 @@ async fn functional_test() -> Result<(), io::Error> {
             #[cfg(debug_assertions)]
             assert!(view.is_valid().await?);
         }
+    }
+
+    {
+        let view = btree.read().await;
 
         let mut i = 1;
 
         {
             let range = Range::with_range(vec![], 0..67);
-            let mut nodes = view.nodes(&range);
-            while let Some(node) = nodes.try_next().await? {
-                for key in &*node {
-                    assert_eq!(key[0], i);
-                    i += 1;
-                }
+            let mut keys = view.clone().keys(range, false);
+            while let Some(key) = keys.try_next().await? {
+                assert_eq!(key[0], i);
+                i += 1;
             }
         }
 
         {
             let range = Range::with_range(vec![], 67..250);
-            let mut nodes = view.nodes(&range);
-            while let Some(node) = nodes.try_next().await? {
-                for key in &*node {
-                    assert_eq!(key[0], i);
-                    i += 1;
-                }
+            let mut keys = view.clone().keys(range, false);
+            while let Some(key) = keys.try_next().await? {
+                assert_eq!(key[0], i);
+                i += 1;
             }
         }
 
         let mut i = 1;
-        let mut keys = view.keys(Range::with_range(vec![], 0..123), false);
+        let mut keys = view.clone().keys(Range::with_range(vec![], 0..123), false);
         while let Some(key) = keys.try_next().await? {
             assert_eq!(key[0], i);
             i += 1;
         }
 
-        let view = btree.read().await;
         let mut keys = view.keys(Range::with_range(vec![], 123..n), false);
         while let Some(key) = keys.try_next().await? {
             assert_eq!(key[0], i);
@@ -196,20 +195,12 @@ async fn functional_test() -> Result<(), io::Error> {
         for i in 1..n {
             let count = (i as u64) - 1;
             let range_left = Range::with_range(vec![], 0..i);
-
-            assert_eq!(
-                count_keys(&view, &range_left).await?,
-                count,
-                "bad key count at {}",
-                i
-            );
-
             assert_eq!(view.count(&range_left).await?, count, "bad count at {}", i);
         }
 
         std::mem::drop(view);
 
-        let view = btree.write().await;
+        let view = btree.read().await;
 
         for i in 1..n {
             let key = vec![i, i16::MAX - i, i16::MAX - 2 * i];
@@ -217,12 +208,14 @@ async fn functional_test() -> Result<(), io::Error> {
         }
 
         let mut i = n - 1;
-        let mut reversed = view.keys(Range::default(), true);
+        let mut reversed = view.clone().keys(Range::default(), true);
         while let Some(key) = reversed.try_next().await? {
             assert_eq!(key[0], i);
             i -= 1;
         }
         assert_eq!(i, 0);
+
+        std::mem::drop(view);
 
         let mut view = btree.write().await;
         let mut count = view.count(&Range::default()).await?;
@@ -249,7 +242,10 @@ async fn functional_test() -> Result<(), io::Error> {
 
             assert_eq!(view.count(&Range::default()).await?, count);
         }
+    }
 
+    {
+        let view = btree.try_read().expect("btree read");
         assert_eq!(view.keys(Range::default(), false).try_next().await?, None);
     }
 
@@ -313,18 +309,4 @@ async fn main() -> Result<(), io::Error> {
     functional_test().await?;
     load_test().await?;
     Ok(())
-}
-
-async fn count_keys(
-    view: &BTreeReadGuard<ExampleSchema<i16>, Collator<i16>, File>,
-    range: &Range<i16>,
-) -> Result<u64, io::Error> {
-    let mut count = 0u64;
-
-    let mut leaves = view.nodes(range);
-    while let Some(leaf) = leaves.try_next().await? {
-        count += leaf.len() as u64;
-    }
-
-    Ok(count)
 }

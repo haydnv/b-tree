@@ -1,4 +1,3 @@
-use std::ops::Deref;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::{fmt, io};
@@ -21,7 +20,7 @@ use super::range::Range;
 use super::{Collator, Key, Schema};
 
 /// A read guard acquired on a [`BTreeLock`]
-pub type BTreeReadGuard<S, C, FE> = BTree<S, C, DirReadGuardOwned<FE>>;
+pub type BTreeReadGuard<S, C, FE> = BTree<S, C, Arc<DirReadGuardOwned<FE>>>;
 
 /// A write guard acquired on a [`BTreeLock`]
 pub type BTreeWriteGuard<S, C, FE> = BTree<S, C, DirWriteGuardOwned<FE>>;
@@ -74,7 +73,7 @@ where
         }
     }
 
-    /// Create a new [`BTreeLock`] in `dir` with the given `collator`
+    /// Create a new [`BTreeLock`] in `dir` with the given `collator`.
     pub fn create(schema: S, collator: C, dir: DirLock<FE>) -> Result<Self, io::Error> {
         let mut nodes = dir.try_write_owned()?;
 
@@ -90,7 +89,7 @@ where
         }
     }
 
-    /// Load a [`BTreeLock`] with the given `schema` and `collator` from `dir`
+    /// Load a [`BTreeLock`] with the given `schema` and `collator` from `dir`.
     pub fn load(schema: S, collator: C, dir: DirLock<FE>) -> Result<Self, io::Error> {
         let mut nodes = dir.try_write_owned()?;
 
@@ -106,10 +105,11 @@ impl<S, C, FE> BTreeLock<S, C, FE>
 where
     FE: Send + Sync,
 {
-    /// Lock this B+Tree for reading, without borrowing
+    /// Lock this B+Tree for reading, without borrowing.
     pub async fn into_read(self) -> BTreeReadGuard<S, C, FE> {
         self.dir
             .into_read()
+            .map(Arc::new)
             .map(|dir| BTree {
                 schema: self.schema.clone(),
                 collator: self.collator.clone(),
@@ -118,10 +118,11 @@ where
             .await
     }
 
-    /// Lock this B+Tree for reading
+    /// Lock this B+Tree for reading.
     pub async fn read(&self) -> BTreeReadGuard<S, C, FE> {
         self.dir
             .read_owned()
+            .map(Arc::new)
             .map(|dir| BTree {
                 schema: self.schema.clone(),
                 collator: self.collator.clone(),
@@ -130,7 +131,16 @@ where
             .await
     }
 
-    /// Lock this B+Tree for writing, without borrowing
+    /// Lock this B+Tree for reading synchronously, if possible.
+    pub fn try_read(&self) -> Result<BTreeReadGuard<S, C, FE>, io::Error> {
+        self.dir.try_read_owned().map(Arc::new).map(|dir| BTree {
+            schema: self.schema.clone(),
+            collator: self.collator.clone(),
+            dir,
+        })
+    }
+
+    /// Lock this B+Tree for writing, without borrowing.
     pub async fn into_write(self) -> BTreeWriteGuard<S, C, FE> {
         self.dir
             .into_write()
@@ -142,7 +152,7 @@ where
             .await
     }
 
-    /// Lock this B+Tree for writing
+    /// Lock this B+Tree for writing.
     pub async fn write(&self) -> BTreeWriteGuard<S, C, FE> {
         self.dir
             .write_owned()
@@ -152,6 +162,15 @@ where
                 dir,
             })
             .await
+    }
+
+    /// Lock this B+Tree for writing synchronously, if possible.
+    pub fn try_write(&self) -> Result<BTreeWriteGuard<S, C, FE>, io::Error> {
+        self.dir.try_write_owned().map(|dir| BTree {
+            schema: self.schema.clone(),
+            collator: self.collator.clone(),
+            dir,
+        })
     }
 }
 
@@ -211,14 +230,24 @@ where
 
 type IntoStream<V> = Pin<Box<dyn Stream<Item = Result<Key<V>, io::Error>> + Send>>;
 
-type ToStream<'a, FE, V> =
-    Pin<Box<dyn Stream<Item = Result<FileReadGuardOwned<FE, [Key<V>]>, io::Error>> + 'a>>;
-
 /// A B+Tree
 pub struct BTree<S, C, G> {
     schema: Arc<S>,
     collator: Arc<Collator<C>>,
     dir: G,
+}
+
+impl<S, C, G> Clone for BTree<S, C, G>
+where
+    G: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            schema: self.schema.clone(),
+            collator: self.collator.clone(),
+            dir: self.dir.clone(),
+        }
+    }
 }
 
 impl<S, C, G> BTree<S, C, G>
@@ -237,12 +266,12 @@ where
     S: Schema,
     C: Collate<Value = S::Value>,
     FE: AsType<Node<S::Value>> + Send + Sync,
-    G: Deref<Target = Dir<FE>>,
+    G: DirDeref<Entry = FE>,
     Node<S::Value>: FileLoad + fmt::Debug,
 {
     /// Return `true` if this B+Tree contains the given `key`.
     pub async fn contains(&self, key: &Key<S::Value>) -> Result<bool, io::Error> {
-        let mut node = self.dir.read_file(&ROOT).await?;
+        let mut node = self.dir.as_dir().read_file(&ROOT).await?;
 
         loop {
             match &*node {
@@ -264,7 +293,7 @@ where
                     if i == 0 {
                         return Ok(false);
                     } else {
-                        node = self.dir.read_file(&children[i - 1]).await?;
+                        node = self.dir.as_dir().read_file(&children[i - 1]).await?;
                     }
                 }
             }
@@ -273,7 +302,7 @@ where
 
     /// Count how many keys lie within the given `range` of this B+Tree.
     pub async fn count(&self, range: &Range<S::Value>) -> Result<u64, io::Error> {
-        let root = self.dir.read_file(&ROOT).await?;
+        let root = self.dir.as_dir().read_file(&ROOT).await?;
         self.count_inner(range, root).await
     }
 
@@ -302,7 +331,7 @@ where
                 }
                 Node::Index(_bounds, children) if range.is_default() => {
                     stream::iter(children)
-                        .then(|node_id| self.dir.read_file(node_id))
+                        .then(|node_id| self.dir.as_dir().read_file(node_id))
                         .map_ok(|node| self.count_inner(range, node))
                         .try_buffer_unordered(num_cpus::get())
                         .try_fold(0, |sum, count| future::ready(Ok(sum + count)))
@@ -313,31 +342,39 @@ where
                     let l = if l == 0 { l } else { l - 1 };
 
                     if l == children.len() {
-                        let node = self.dir.read_file(children.last().expect("last")).await?;
+                        let node = self
+                            .dir
+                            .as_dir()
+                            .read_file(children.last().expect("last"))
+                            .await?;
+
                         self.count_inner(range, node).await
                     } else if l == r || l + 1 == r {
-                        let node = self.dir.read_file(&children[l]).await?;
+                        let node = self.dir.as_dir().read_file(&children[l]).await?;
                         self.count_inner(range, node).await
                     } else {
                         let left = self
                             .dir
+                            .as_dir()
                             .read_file(&children[l])
                             .and_then(|node| self.count_inner(range, node));
 
                         let default_range = Range::default();
 
                         let middle = stream::iter(&children[(l + 1)..(r - 1)])
-                            .then(|node_id| self.dir.read_file(node_id))
+                            .then(|node_id| self.dir.as_dir().read_file(node_id))
                             .map_ok(|node| self.count_inner(&default_range, node))
                             .try_buffer_unordered(num_cpus::get())
                             .try_fold(0, |sum, count| future::ready(Ok(sum + count)));
 
                         let right = self
                             .dir
+                            .as_dir()
                             .read_file(&children[r - 1])
                             .and_then(|node| self.count_inner(range, node));
 
                         let (left, middle, right) = try_join!(left, middle, right)?;
+
                         Ok(left + middle + right)
                     }
                 }
@@ -347,7 +384,7 @@ where
 
     /// Return the first key in this B+Tree within the given `range`, if any.
     pub async fn first(&self, range: &Range<S::Value>) -> Result<Option<Key<S::Value>>, io::Error> {
-        let mut node = self.dir.read_file(&ROOT).await?;
+        let mut node = self.dir.as_dir().read_file(&ROOT).await?;
 
         if let Node::Leaf(keys) = &*node {
             if keys.is_empty() {
@@ -372,11 +409,15 @@ where
                     let (l, _r) = bounds.bisect(range, &self.collator);
 
                     if l == bounds.len() {
-                        node = self.dir.read_file(children.last().expect("last")).await?;
+                        node = self
+                            .dir
+                            .as_dir()
+                            .read_file(children.last().expect("last"))
+                            .await?;
                     } else if range.contains_value(&bounds[l], &self.collator) {
                         break Some(bounds[l].clone());
                     } else {
-                        node = self.dir.read_file(&children[l]).await?;
+                        node = self.dir.as_dir().read_file(&children[l]).await?;
                     }
                 }
             }
@@ -385,7 +426,7 @@ where
 
     /// Return the last key in this B+Tree with the given `prefix`, if any.
     pub async fn last(&self, range: &Range<S::Value>) -> Result<Option<Key<S::Value>>, io::Error> {
-        let mut node = self.dir.read_file(&ROOT).await?;
+        let mut node = self.dir.as_dir().read_file(&ROOT).await?;
 
         if let Node::Leaf(keys) = &*node {
             if keys.is_empty() {
@@ -416,7 +457,7 @@ where
                     if r == 0 {
                         break None;
                     } else {
-                        node = self.dir.read_file(&children[r - 1]).await?;
+                        node = self.dir.as_dir().read_file(&children[r - 1]).await?;
                     }
                 }
             }
@@ -425,7 +466,7 @@ where
 
     /// Return `true` if the given `range` of this B+Tree contains zero keys.
     pub async fn is_empty(&self, range: &Range<S::Value>) -> Result<bool, io::Error> {
-        let mut node = self.dir.read_file(&ROOT).await?;
+        let mut node = self.dir.as_dir().read_file(&ROOT).await?;
 
         Ok(loop {
             match &*node {
@@ -437,136 +478,15 @@ where
                     let (l, r) = bounds.bisect(range, &*self.collator);
 
                     if l == children.len() {
-                        node = self.dir.read_file(&children[l - 1]).await?;
+                        node = self.dir.as_dir().read_file(&children[l - 1]).await?;
                     } else if l == r {
-                        node = self.dir.read_file(&children[l]).await?;
+                        node = self.dir.as_dir().read_file(&children[l]).await?;
                     } else {
                         break false;
                     }
                 }
             }
         })
-    }
-
-    /// Borrow all the keys in the given `range` of this B+Tree.
-    pub fn nodes<'a>(
-        &'a self,
-        range: &'a Range<S::Value>,
-    ) -> impl Stream<Item = Result<FileReadGuardOwned<FE, [Key<S::Value>]>, io::Error>> + 'a
-    where
-        FE: 'a,
-    {
-        let range = if range.is_default() {
-            None
-        } else {
-            Some(range)
-        };
-
-        self.nodes_inner(range, ROOT)
-    }
-
-    fn nodes_inner<'a>(
-        &'a self,
-        range: Option<&'a Range<S::Value>>,
-        node_id: Uuid,
-    ) -> ToStream<'a, FE, S::Value>
-    where
-        FE: 'a,
-    {
-        let file = self.dir.get_file(&node_id).expect("node").clone();
-        let fut = file.into_read().map_ok(move |node| {
-            let keys: ToStream<FE, S::Value> = {
-                if node.is_leaf() {
-                    let guard = FileReadGuardOwned::try_map(node, |node| match node {
-                        Node::Leaf(keys) => match range {
-                            None => Some(&keys[..]),
-                            Some(range) => {
-                                let (l, r) = keys.bisect(range, &*self.collator);
-
-                                let slice = if l == r && l < keys.len() {
-                                    if range.contains_value(&keys[l], &*self.collator) {
-                                        &keys[l..l + 1]
-                                    } else {
-                                        &keys[l..l]
-                                    }
-                                } else {
-                                    &keys[l..r]
-                                };
-
-                                Some(slice)
-                            }
-                        },
-                        Node::Index(_, _) => None,
-                    })
-                    .expect("leaf");
-
-                    Box::pin(stream::once(future::ready(Ok(guard))))
-                } else {
-                    let children = match &*node {
-                        Node::Index(bounds, children) => match range {
-                            Some(range) => {
-                                let (l, r) = bounds.bisect(range, &*self.collator);
-                                let l = if l == 0 { l } else { l - 1 };
-                                children[l..r].to_vec()
-                            }
-                            None => children.to_vec(),
-                        },
-                        _ => unreachable!("leaf case handled above"),
-                    };
-
-                    let keys = children
-                        .into_iter()
-                        .map(move |node_id| self.nodes_inner(range, node_id));
-
-                    Box::pin(stream::iter(keys).flatten())
-                }
-            };
-
-            keys
-        });
-
-        Box::pin(stream::once(fut).try_flatten())
-    }
-
-    #[cfg(debug_assertions)]
-    pub async fn is_valid(&self) -> Result<bool, io::Error> {
-        {
-            let root = self.dir.read_file(&ROOT).await?;
-
-            match &*root {
-                Node::Leaf(keys) => {
-                    assert!(keys.len() <= self.schema.order());
-                    // assert!(self.collator.is_sorted(&keys));
-                }
-                Node::Index(bounds, children) => {
-                    assert_eq!(bounds.len(), children.len());
-                    // assert!(self.collator.is_sorted(bounds));
-
-                    for (left, node_id) in bounds.iter().zip(children) {
-                        let node = self.dir.read_file(node_id).await?;
-
-                        match &*node {
-                            Node::Leaf(keys) => assert_eq!(left, &keys[0]),
-                            Node::Index(bounds, _) => assert_eq!(left, &bounds[0]),
-                        }
-
-                        assert!(self.is_valid_node(&*node).await?);
-                    }
-                }
-            }
-        }
-
-        let range = Range::default();
-        let count = self.count(&range).await? as usize;
-        let mut contents = Vec::with_capacity(count);
-        let mut stream = self.nodes(&range);
-        while let Some(leaf) = stream.try_next().await? {
-            contents.extend_from_slice(&*leaf);
-        }
-
-        assert_eq!(count, contents.len());
-
-        Ok(true)
     }
 
     #[cfg(debug_assertions)]
@@ -590,7 +510,7 @@ where
                     assert!(children.len() <= order);
 
                     for (left, node_id) in bounds.iter().zip(children) {
-                        let node = self.dir.read_file(node_id).await?;
+                        let node = self.dir.as_dir().read_file(node_id).await?;
 
                         match &*node {
                             Node::Leaf(keys) => assert_eq!(left, &keys[0]),
@@ -612,7 +532,7 @@ where
     S: Schema,
     C: Collate<Value = S::Value> + Send + Sync + 'static,
     FE: AsType<Node<S::Value>> + Send + Sync + 'static,
-    G: Deref<Target = Dir<FE>> + Send + Sync + 'static,
+    G: DirDeref<Entry = FE> + Clone + Send + Sync + 'static,
     Node<S::Value>: FileLoad + fmt::Debug,
 {
     /// Copy all the keys in the given `range` of this B+Tree.
@@ -624,15 +544,56 @@ where
         let range = range.into();
 
         if reverse {
-            keys_reverse(Arc::new(self.dir), self.collator, range, ROOT)
+            keys_reverse(self.dir, self.collator, range, ROOT)
         } else {
-            keys_forward(Arc::new(self.dir), self.collator, range, ROOT)
+            keys_forward(self.dir, self.collator, range, ROOT)
         }
+    }
+
+    #[cfg(debug_assertions)]
+    pub async fn is_valid(self) -> Result<bool, io::Error> {
+        {
+            let root = self.dir.as_dir().read_file(&ROOT).await?;
+
+            match &*root {
+                Node::Leaf(keys) => {
+                    assert!(keys.len() <= self.schema.order());
+                    // assert!(self.collator.is_sorted(&keys));
+                }
+                Node::Index(bounds, children) => {
+                    assert_eq!(bounds.len(), children.len());
+                    // assert!(self.collator.is_sorted(bounds));
+
+                    for (left, node_id) in bounds.iter().zip(children) {
+                        let node = self.dir.as_dir().read_file(node_id).await?;
+
+                        match &*node {
+                            Node::Leaf(keys) => assert_eq!(left, &keys[0]),
+                            Node::Index(bounds, _) => assert_eq!(left, &bounds[0]),
+                        }
+
+                        assert!(self.is_valid_node(&*node).await?);
+                    }
+                }
+            }
+        }
+
+        let range = Range::default();
+        let count = self.count(&range).await? as usize;
+        let mut contents = Vec::with_capacity(count);
+        let mut stream = self.keys(range, false);
+        while let Some(key) = stream.try_next().await? {
+            contents.push(key);
+        }
+
+        assert_eq!(count, contents.len());
+
+        Ok(true)
     }
 }
 
 fn keys_forward<C, V, FE, G>(
-    dir: Arc<G>,
+    dir: G,
     collator: Arc<Collator<C>>,
     range: Arc<Range<V>>,
     node_id: Uuid,
@@ -641,13 +602,13 @@ where
     C: Collate<Value = V> + Send + Sync + 'static,
     V: Clone + PartialEq + fmt::Debug + Send + Sync + 'static,
     FE: AsType<Node<V>> + Send + Sync + 'static,
-    G: Deref<Target = Dir<FE>> + Send + Sync + 'static,
+    G: DirDeref<Entry = FE> + Clone + Send + Sync + 'static,
     Node<V>: FileLoad,
 {
     #[cfg(feature = "logging")]
     log::debug!("reading BTree keys in forward order");
 
-    let file = dir.get_file(&node_id).expect("node").clone();
+    let file = dir.as_dir().get_file(&node_id).expect("node").clone();
     let fut = file.into_read().map_ok(move |node| {
         #[cfg(feature = "logging")]
         log::debug!("locked node for reading");
@@ -735,7 +696,7 @@ where
 }
 
 fn keys_reverse<C, V, FE, G>(
-    dir: Arc<G>,
+    dir: G,
     collator: Arc<Collator<C>>,
     range: Arc<Range<V>>,
     node_id: Uuid,
@@ -744,10 +705,10 @@ where
     C: Collate<Value = V> + Send + Sync + 'static,
     V: Clone + PartialEq + fmt::Debug + Send + Sync + 'static,
     FE: AsType<Node<V>> + Send + Sync + 'static,
-    G: Deref<Target = Dir<FE>> + Send + Sync + 'static,
+    G: DirDeref<Entry = FE> + Clone + Send + Sync + 'static,
     Node<V>: FileLoad,
 {
-    let file = dir.get_file(&node_id).expect("node").clone();
+    let file = dir.as_dir().get_file(&node_id).expect("node").clone();
     let fut = file.into_read().map_ok(move |node| {
         let keys: IntoStream<V> = match &*node {
             Node::Leaf(keys) if range.is_default() => {
@@ -804,6 +765,7 @@ where
                         .rev()
                         .copied()
                         .collect::<Vec<_>>();
+
                     let middle = stream::iter(middle_children)
                         .map(move |node_id| {
                             keys_reverse(
@@ -867,7 +829,7 @@ impl<S, C, FE> BTree<S, C, DirWriteGuardOwned<FE>> {
         BTreeReadGuard {
             schema: self.schema,
             collator: self.collator,
-            dir: self.dir.downgrade(),
+            dir: Arc::new(self.dir.downgrade()),
         }
     }
 }
@@ -1478,7 +1440,7 @@ where
     /// The source B+Tree **must** have an identical schema and collation.
     pub async fn merge<G>(&mut self, other: BTree<S, C, G>) -> Result<(), S::Error>
     where
-        G: Deref<Target = Dir<FE>> + Send + Sync + 'static,
+        G: DirDeref<Entry = FE> + Clone + Send + Sync + 'static,
     {
         validate_collator_eq(&self.collator, &other.collator)?;
         validate_schema_eq(&self.schema, &other.schema)?;
@@ -1496,7 +1458,7 @@ where
     /// The source B+Tree **must** have an identical schema and collation.
     pub async fn delete_all<G>(&mut self, other: BTree<S, C, G>) -> Result<(), S::Error>
     where
-        G: Deref<Target = Dir<FE>> + Send + Sync + 'static,
+        G: DirDeref<Entry = FE> + Clone + Send + Sync + 'static,
     {
         validate_collator_eq(&self.collator, &other.collator)?;
         validate_schema_eq(&self.schema, &other.schema)?;
