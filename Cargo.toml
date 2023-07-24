@@ -1,6 +1,6 @@
 [package]
 name = "b-tree"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["code@tinychain.net"]
 edition = "2021"
 description = "A persistent B+ tree using freqfs"
@@ -24,7 +24,7 @@ required-features = ["stream"]
 async-trait = { version = "0.1", optional = true }
 collate = "0.3"
 destream = { version = "0.7", optional = true }
-freqfs = { path = "../freqfs" }
+freqfs = "~0.8.1"
 futures = "0.3"
 get-size = "0.1"
 log = { version = "0.4", features = ["release_max_level_info"], optional = true }
