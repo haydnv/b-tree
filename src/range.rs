@@ -114,11 +114,20 @@ where
 
                 match (start, end) {
                     (start, Ordering::Less) => {
-                        debug_assert_eq!(start, Ordering::Less);
+                        debug_assert!(
+                            start != Ordering::Greater,
+                            "test if {self:?} overlaps {key:?}"
+                        );
+
                         Overlap::Less
                     }
                     (Ordering::Greater, end) => {
-                        debug_assert_eq!(end, Ordering::Greater);
+                        debug_assert_eq!(
+                            end,
+                            Ordering::Greater,
+                            "test if {self:?} overlaps {key:?}"
+                        );
+
                         Overlap::Greater
                     }
                     (Ordering::Equal, Ordering::Equal) if key.len() == self.prefix.len() + 1 => {
@@ -225,11 +234,11 @@ impl<K: fmt::Debug> fmt::Debug for Range<K> {
 
         match (&self.start, &self.end) {
             (Bound::Excluded(l), Bound::Unbounded) => write!(f, "[{:?},)", l),
-            (Bound::Excluded(l), Bound::Excluded(r)) => write!(f, "[{:?},{:?}]", l, r),
-            (Bound::Excluded(l), Bound::Included(r)) => write!(f, "[{:?},{:?})", l, r),
+            (Bound::Excluded(l), Bound::Excluded(r)) => write!(f, "[{:?}, {:?}]", l, r),
+            (Bound::Excluded(l), Bound::Included(r)) => write!(f, "[{:?}, {:?})", l, r),
             (Bound::Included(l), Bound::Unbounded) => write!(f, "({:?},)", l),
-            (Bound::Included(l), Bound::Excluded(r)) => write!(f, "({:?},{:?}]", l, r),
-            (Bound::Included(l), Bound::Included(r)) => write!(f, "({:?},{:?})", l, r),
+            (Bound::Included(l), Bound::Excluded(r)) => write!(f, "({:?}, {:?}]", l, r),
+            (Bound::Included(l), Bound::Included(r)) => write!(f, "({:?}, {:?})", l, r),
             (Bound::Unbounded, Bound::Unbounded) => write!(f, "()"),
             (Bound::Unbounded, Bound::Excluded(r)) => write!(f, "(,{:?}]", r),
             (Bound::Unbounded, Bound::Included(r)) => write!(f, "(,{:?})", r),
