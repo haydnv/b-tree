@@ -99,6 +99,14 @@ where
 
         Ok(Self::new(schema, collator, dir))
     }
+
+    /// Write any modified blocks of thie [`BTree`] to the filesystem.
+    pub async fn sync(&self) -> Result<(), io::Error>
+    where
+        FE: for<'a> freqfs::FileSave<'a>,
+    {
+        self.dir.sync().await
+    }
 }
 
 impl<S, C, FE> BTreeLock<S, C, FE>
@@ -107,6 +115,9 @@ where
 {
     /// Lock this B+Tree for reading, without borrowing.
     pub async fn into_read(self) -> BTreeReadGuard<S, C, FE> {
+        #[cfg(feature = "logging")]
+        log::debug!("lock B+Tree at {:?} for reading...", self.dir);
+
         self.dir
             .into_read()
             .map(Arc::new)
@@ -120,6 +131,9 @@ where
 
     /// Lock this B+Tree for reading.
     pub async fn read(&self) -> BTreeReadGuard<S, C, FE> {
+        #[cfg(feature = "logging")]
+        log::debug!("lock B+Tree at {:?} for reading...", self.dir);
+
         self.dir
             .read_owned()
             .map(Arc::new)
@@ -142,6 +156,9 @@ where
 
     /// Lock this B+Tree for writing, without borrowing.
     pub async fn into_write(self) -> BTreeWriteGuard<S, C, FE> {
+        #[cfg(feature = "logging")]
+        log::debug!("lock B+Tree at {:?} for writing...", self.dir);
+
         self.dir
             .into_write()
             .map(|dir| BTree {
@@ -154,6 +171,9 @@ where
 
     /// Lock this B+Tree for writing.
     pub async fn write(&self) -> BTreeWriteGuard<S, C, FE> {
+        #[cfg(feature = "logging")]
+        log::debug!("lock B+Tree at {:?} for writing...", self.dir);
+
         self.dir
             .write_owned()
             .map(|dir| BTree {
@@ -535,7 +555,7 @@ where
     G: DirDeref<Entry = FE> + Clone + Send + Sync + 'static,
     Node<S::Value>: FileLoad + fmt::Debug,
 {
-    /// Copy all the keys in the given `range` of this B+Tree.
+    /// Construct a [`Stream`] of all the keys in the given `range` of this B+Tree.
     pub fn keys<R: Into<Arc<Range<S::Value>>>>(
         self,
         range: R,
