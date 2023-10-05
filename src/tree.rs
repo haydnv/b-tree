@@ -13,11 +13,15 @@ use futures::stream::{self, Stream, StreamExt, TryStreamExt};
 use futures::try_join;
 use futures::TryFutureExt;
 use safecast::AsType;
+use smallvec::SmallVec;
 use uuid::Uuid;
 
 use super::node::Block;
 use super::range::Range;
 use super::{Collator, Key, Schema};
+
+const NODE_STACK_SIZE: usize = 32;
+type NodeStack<V> = SmallVec<[Key<V>; NODE_STACK_SIZE]>;
 
 /// A read guard acquired on a [`BTreeLock`]
 pub type BTreeReadGuard<S, C, FE> = BTree<S, C, Arc<DirReadGuardOwned<FE>>>;
@@ -26,7 +30,7 @@ pub type BTreeReadGuard<S, C, FE> = BTree<S, C, Arc<DirReadGuardOwned<FE>>>;
 pub type BTreeWriteGuard<S, C, FE> = BTree<S, C, DirWriteGuardOwned<FE>>;
 
 // TODO: genericize
-type Node<V> = super::node::Node<Vec<Key<V>>>;
+type Node<V> = super::node::Node<Vec<Vec<V>>>;
 
 const ROOT: Uuid = Uuid::from_fields(0, 0, 0, &[0u8; 8]);
 
@@ -290,7 +294,7 @@ where
     Node<S::Value>: FileLoad + fmt::Debug,
 {
     /// Return `true` if this B+Tree contains the given `key`.
-    pub async fn contains(&self, key: &Key<S::Value>) -> Result<bool, io::Error> {
+    pub async fn contains(&self, key: &[S::Value]) -> Result<bool, io::Error> {
         let mut node = self.dir.as_dir().read_file(&ROOT).await?;
 
         loop {
@@ -420,7 +424,7 @@ where
                     break if l == keys.len() {
                         None
                     } else if range.contains_value(&keys[l], &self.collator) {
-                        Some(keys[l].clone())
+                        Some(stack_key(&keys[l]))
                     } else {
                         None
                     };
@@ -435,7 +439,7 @@ where
                             .read_file(children.last().expect("last"))
                             .await?;
                     } else if range.contains_value(&bounds[l], &self.collator) {
-                        break Some(bounds[l].clone());
+                        break Some(stack_key(&bounds[l]));
                     } else {
                         node = self.dir.as_dir().read_file(&children[l]).await?;
                     }
@@ -461,12 +465,12 @@ where
 
                     break if r == keys.len() {
                         if range.contains_value(&keys[r - 1], &self.collator) {
-                            Some(keys[r - 1].clone())
+                            Some(stack_key(&keys[r - 1]))
                         } else {
                             None
                         }
                     } else if range.contains_value(&keys[r], &self.collator) {
-                        Some(keys[r].clone())
+                        Some(stack_key(&keys[r]))
                     } else {
                         None
                     };
@@ -524,7 +528,6 @@ where
                 }
                 Node::Index(bounds, children) => {
                     assert_eq!(bounds.len(), children.len());
-                    // assert!(self.collator.is_sorted(bounds));
                     assert!(children.len() >= self.schema.order() / 2);
                     assert!(children.len() <= order);
 
@@ -632,8 +635,9 @@ where
 
         let keys: IntoStream<V> = match &*node {
             Node::Leaf(keys) if range.is_default() => {
-                let keys = stream::iter(keys.to_vec().into_iter().map(Ok));
-                Box::pin(keys)
+                let keys = keys.iter().map(stack_key).collect::<NodeStack<V>>();
+
+                Box::pin(stream::iter(keys).map(Ok))
             }
             Node::Leaf(keys) => {
                 let (l, r) = keys.bisect(&*range, &*collator);
@@ -642,16 +646,20 @@ where
                     Box::pin(stream::empty())
                 } else if l == r {
                     if range.contains_value(&keys[l], &*collator) {
-                        Box::pin(stream::once(future::ready(Ok(keys[l].to_vec()))))
+                        Box::pin(stream::once(future::ready(Ok(stack_key(&keys[l])))))
                     } else {
                         Box::pin(stream::empty())
                     }
                 } else {
-                    Box::pin(stream::iter(keys[l..r].to_vec().into_iter().map(Ok)))
+                    let keys = keys[l..r].iter().map(stack_key).collect::<NodeStack<V>>();
+
+                    Box::pin(stream::iter(keys).map(Ok))
                 }
             }
             Node::Index(_bounds, children) if range.is_default() => {
-                let keys = stream::iter(children.to_vec())
+                let children = SmallVec::<[Uuid; NODE_STACK_SIZE]>::from_slice(children);
+
+                let keys = stream::iter(children)
                     .map(move |node_id| {
                         #[cfg(feature = "logging")]
                         log::debug!("reading keys from child node...");
@@ -690,7 +698,11 @@ where
 
                     let default_range = Arc::new(Range::default());
 
-                    let middle = stream::iter(children[(l + 1)..(r - 1)].to_vec())
+                    let children = SmallVec::<[Uuid; NODE_STACK_SIZE]>::from_slice(
+                        &children[(l + 1)..(r - 1)],
+                    );
+
+                    let middle = stream::iter(children)
                         .map(move |node_id| {
                             keys_forward(
                                 dir.clone(),
@@ -729,7 +741,8 @@ where
     let fut = file.into_read().map_ok(move |node| {
         let keys: IntoStream<V> = match &*node {
             Node::Leaf(keys) if range.is_default() => {
-                let keys = keys.iter().rev().cloned().collect::<Vec<_>>();
+                let keys = keys.iter().rev().map(stack_key).collect::<NodeStack<V>>();
+
                 Box::pin(stream::iter(keys.into_iter().map(Ok)))
             }
             Node::Leaf(keys) => {
@@ -739,17 +752,27 @@ where
                     Box::pin(stream::empty())
                 } else if l == r {
                     if range.contains_value(&keys[l], &*collator) {
-                        Box::pin(stream::once(future::ready(Ok(keys[l].to_vec()))))
+                        Box::pin(stream::once(future::ready(Ok(stack_key(&keys[l])))))
                     } else {
                         Box::pin(stream::empty())
                     }
                 } else {
-                    let keys = keys[l..r].iter().rev().cloned().collect::<Vec<_>>();
+                    let keys = keys[l..r]
+                        .iter()
+                        .rev()
+                        .map(stack_key)
+                        .collect::<NodeStack<V>>();
+
                     Box::pin(stream::iter(keys.into_iter().map(Ok)))
                 }
             }
             Node::Index(_bounds, children) if range.is_default() => {
-                let children = children.iter().rev().copied().collect::<Vec<_>>();
+                let children = children
+                    .iter()
+                    .rev()
+                    .copied()
+                    .collect::<SmallVec<[Uuid; NODE_STACK_SIZE]>>();
+
                 let keys = stream::iter(children)
                     .map(move |node_id| {
                         keys_reverse(dir.clone(), collator.clone(), range.clone(), node_id)
@@ -781,7 +804,7 @@ where
                         .iter()
                         .rev()
                         .copied()
-                        .collect::<Vec<_>>();
+                        .collect::<SmallVec<[Uuid; NODE_STACK_SIZE]>>();
 
                     let middle = stream::iter(middle_children)
                         .map(move |node_id| {
@@ -806,8 +829,8 @@ where
 }
 
 enum MergeIndexLeft<V> {
-    Borrow(Key<V>),
-    Merge(Key<V>),
+    Borrow(Vec<V>),
+    Merge(Vec<V>),
 }
 
 enum MergeIndexRight {
@@ -816,8 +839,8 @@ enum MergeIndexRight {
 }
 
 enum MergeLeafLeft<V> {
-    Borrow(Key<V>),
-    Merge(Key<V>),
+    Borrow(Vec<V>),
+    Merge(Vec<V>),
 }
 
 enum MergeLeafRight {
@@ -827,17 +850,17 @@ enum MergeLeafRight {
 
 enum Delete<FE, V> {
     None,
-    Left(Key<V>),
+    Left(Vec<V>),
     Right,
     Underflow(FileWriteGuardOwned<FE, Node<V>>),
 }
 
 enum Insert<V> {
     None,
-    Left(Key<V>),
+    Left(Vec<V>),
     Right,
-    OverflowLeft(Key<V>, Key<V>, Uuid),
-    Overflow(Key<V>, Uuid),
+    OverflowLeft(Vec<V>, Vec<V>, Uuid),
+    Overflow(Vec<V>, Uuid),
 }
 
 impl<S, C, FE> BTree<S, C, DirWriteGuardOwned<FE>> {
@@ -859,7 +882,7 @@ where
     Node<S::Value>: FileLoad,
 {
     /// Delete the given `key` from this B+Tree.
-    pub async fn delete(&mut self, key: &Key<S::Value>) -> Result<bool, io::Error> {
+    pub async fn delete(&mut self, key: &[S::Value]) -> Result<bool, io::Error> {
         let mut root = self.dir.write_file_owned(&ROOT).await?;
 
         let new_root = match &mut *root {
@@ -928,7 +951,7 @@ where
     fn delete_inner<'a>(
         &'a mut self,
         mut node: FileWriteGuardOwned<FE, Node<S::Value>>,
-        key: &'a Key<S::Value>,
+        key: &'a [S::Value],
     ) -> Pin<Box<dyn Future<Output = Result<Delete<FE, S::Value>, io::Error>> + Send + 'a>> {
         Box::pin(async move {
             match &mut *node {
@@ -941,7 +964,7 @@ where
                         if keys.len() < (self.schema.order() / 2) {
                             Ok(Delete::Underflow(node))
                         } else if i == 0 {
-                            Ok(Delete::Left(keys[0].clone()))
+                            Ok(Delete::Left(keys[0].to_vec()))
                         } else {
                             Ok(Delete::Right)
                         }
@@ -995,10 +1018,10 @@ where
 
     fn merge_index<'a>(
         &'a mut self,
-        new_bounds: &'a mut Vec<Key<S::Value>>,
+        new_bounds: &'a mut Vec<Vec<S::Value>>,
         new_children: &'a mut Vec<Uuid>,
         i: usize,
-        bounds: &'a mut Vec<Key<S::Value>>,
+        bounds: &'a mut Vec<Vec<S::Value>>,
         children: &'a mut Vec<Uuid>,
     ) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send + 'a>> {
         Box::pin(async move {
@@ -1040,7 +1063,7 @@ where
 
     fn merge_index_left<'a>(
         &'a self,
-        left_bounds: &'a mut Vec<Key<S::Value>>,
+        left_bounds: &'a mut Vec<Vec<S::Value>>,
         left_children: &'a mut Vec<Uuid>,
         node_id: &'a Uuid,
     ) -> Pin<Box<dyn Future<Output = Result<MergeIndexLeft<S::Value>, io::Error>> + Send + 'a>>
@@ -1078,7 +1101,7 @@ where
 
     fn merge_index_right<'a>(
         &'a self,
-        right_bounds: &'a mut Vec<Key<S::Value>>,
+        right_bounds: &'a mut Vec<Vec<S::Value>>,
         right_children: &'a mut Vec<Uuid>,
         node_id: &'a Uuid,
     ) -> Pin<Box<dyn Future<Output = Result<MergeIndexRight, io::Error>> + Send + 'a>> {
@@ -1108,9 +1131,9 @@ where
 
     fn merge_leaf<'a>(
         &'a mut self,
-        new_keys: &'a mut Vec<Key<S::Value>>,
+        new_keys: &'a mut Vec<Vec<S::Value>>,
         i: usize,
-        bounds: &'a mut Vec<Key<S::Value>>,
+        bounds: &'a mut Vec<Vec<S::Value>>,
         children: &'a mut Vec<Uuid>,
     ) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send + 'a>> {
         Box::pin(async move {
@@ -1146,7 +1169,7 @@ where
 
     fn merge_leaf_left<'a>(
         &'a self,
-        left_keys: &'a mut Vec<Key<S::Value>>,
+        left_keys: &'a mut Vec<Vec<S::Value>>,
         node_id: &'a Uuid,
     ) -> Pin<Box<dyn Future<Output = Result<MergeLeafLeft<S::Value>, io::Error>> + Send + 'a>> {
         Box::pin(async move {
@@ -1184,7 +1207,7 @@ where
 
     fn merge_leaf_right<'a>(
         &'a self,
-        right_keys: &'a mut Vec<Key<S::Value>>,
+        right_keys: &'a mut Vec<Vec<S::Value>>,
         node_id: &'a Uuid,
     ) -> Pin<Box<dyn Future<Output = Result<MergeLeafRight, io::Error>> + Send + 'a>> {
         Box::pin(async move {
@@ -1208,12 +1231,12 @@ where
 
     /// Insert the given `key` into this B+Tree.
     /// Return `false` if te given `key` is already present.
-    pub async fn insert(&mut self, key: Key<S::Value>) -> Result<bool, io::Error> {
+    pub async fn insert(&mut self, key: Vec<S::Value>) -> Result<bool, io::Error> {
         let key = validate_key(&*self.schema, key)?;
         self.insert_root(key).await
     }
 
-    async fn insert_root(&mut self, key: Key<S::Value>) -> Result<bool, io::Error> {
+    async fn insert_root(&mut self, key: Vec<S::Value>) -> Result<bool, io::Error> {
         let order = self.schema.order();
         let mut root = self.dir.write_file_owned(&ROOT).await?;
 
@@ -1316,7 +1339,7 @@ where
     fn insert_inner<'a>(
         &'a mut self,
         node: &'a mut Node<S::Value>,
-        key: Key<S::Value>,
+        key: Vec<S::Value>,
     ) -> Pin<Box<dyn Future<Output = Result<Insert<S::Value>, io::Error>> + Send + 'a>> {
         Box::pin(async move {
             let order = self.schema.order();
@@ -1332,8 +1355,6 @@ where
 
                     keys.insert(i, key);
 
-                    // debug_assert!(self.collator.is_sorted(&keys));
-
                     let mid = order / 2;
 
                     if keys.len() >= order {
@@ -1343,13 +1364,13 @@ where
                         debug_assert!(new_leaf.len() >= mid);
                         debug_assert!(keys.len() >= mid);
 
-                        let middle_key = new_leaf[0].clone();
+                        let middle_key = new_leaf[0].to_vec();
                         let node = Node::Leaf(new_leaf);
                         let (new_node_id, _) = self.dir.create_file_unique(node, size)?;
 
                         if i == 0 {
                             Ok(Insert::OverflowLeft(
-                                keys[0].clone(),
+                                keys[0].to_vec(),
                                 middle_key,
                                 new_node_id,
                             ))
@@ -1360,7 +1381,7 @@ where
                         debug_assert!(keys.len() > mid);
 
                         if i == 0 {
-                            Ok(Insert::Left(keys[0].clone()))
+                            Ok(Insert::Left(keys[0].to_vec()))
                         } else {
                             Ok(Insert::Right)
                         }
@@ -1384,7 +1405,7 @@ where
                             bounds[i] = key;
 
                             return if i == 0 {
-                                Ok(Insert::Left(bounds[i].clone()))
+                                Ok(Insert::Left(bounds[i].to_vec()))
                             } else {
                                 Ok(Insert::Right)
                             };
@@ -1409,7 +1430,7 @@ where
                         let new_bounds: Vec<_> = bounds.drain(mid..).collect();
                         let new_children: Vec<_> = children.drain(mid..).collect();
 
-                        let left_bound = new_bounds[0].clone();
+                        let left_bound = new_bounds[0].to_vec();
                         let node = Node::Index(new_bounds, new_children);
                         let (node_id, _) = self.dir.create_file_unique(node, size)?;
 
@@ -1423,7 +1444,7 @@ where
                             Ok(Insert::Overflow(left_bound, node_id))
                         }
                     } else if i == 0 {
-                        Ok(Insert::Left(bounds[0].clone()))
+                        Ok(Insert::Left(bounds[0].to_vec()))
                     } else {
                         Ok(Insert::Right)
                     }
@@ -1462,7 +1483,7 @@ where
 
         let mut keys = other.keys(Range::default(), false);
         while let Some(key) = keys.try_next().await? {
-            self.insert_root(key).await?;
+            self.insert_root(key.into_vec()).await?;
         }
 
         Ok(())
@@ -1488,7 +1509,7 @@ where
 }
 
 #[inline]
-fn validate_key<S: Schema>(schema: &S, key: Key<S::Value>) -> Result<Key<S::Value>, io::Error> {
+fn validate_key<S: Schema>(schema: &S, key: Vec<S::Value>) -> Result<Vec<S::Value>, io::Error> {
     schema
         .validate_key(key)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))
@@ -1535,4 +1556,13 @@ fn div_ceil(num: usize, denom: usize) -> usize {
         0 => num / denom,
         _ => (num / denom) + 1,
     }
+}
+
+#[inline]
+fn stack_key<'a, T, A>(iter: A) -> SmallVec<[T; NODE_STACK_SIZE]>
+where
+    T: Clone + 'a,
+    A: IntoIterator<Item = &'a T>,
+{
+    iter.into_iter().cloned().collect()
 }

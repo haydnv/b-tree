@@ -4,12 +4,12 @@ use std::ops::{Bound, Range as Bounds};
 
 use collate::{Collate, Overlap, OverlapsRange, OverlapsValue};
 
-use super::{Collator, Key};
+use super::Collator;
 
 /// A range used to select a slice of a `BTree`
 #[derive(Clone, Eq, PartialEq)]
 pub struct Range<V> {
-    prefix: Key<V>,
+    prefix: Vec<V>,
     start: Bound<V>,
     end: Bound<V>,
 }
@@ -81,12 +81,12 @@ impl<V> Range<V> {
     }
 }
 
-impl<C> OverlapsValue<Key<C::Value>, Collator<C>> for Range<C::Value>
+impl<C> OverlapsValue<Vec<C::Value>, Collator<C>> for Range<C::Value>
 where
     C: Collate,
     C::Value: fmt::Debug,
 {
-    fn overlaps_value(&self, key: &Key<C::Value>, collator: &Collator<C>) -> Overlap {
+    fn overlaps_value(&self, key: &Vec<C::Value>, collator: &Collator<C>) -> Overlap {
         match collator.cmp(&self.prefix, key) {
             Ordering::Less => Overlap::Less,
             Ordering::Greater => Overlap::Greater,
@@ -215,7 +215,7 @@ impl<C: Collate> OverlapsRange<Range<C::Value>, Collator<C>> for Range<C::Value>
     }
 }
 
-impl<V, K: Into<Key<V>>> From<(K, Bounds<V>)> for Range<V> {
+impl<V, K: Into<Vec<V>>> From<(K, Bounds<V>)> for Range<V> {
     fn from(tuple: (K, Bounds<V>)) -> Self {
         let (prefix, suffix) = tuple;
         let Bounds { start, end } = suffix;

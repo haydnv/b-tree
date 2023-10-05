@@ -11,12 +11,12 @@ use rand::Rng;
 use safecast::as_type;
 use tokio::fs;
 
-use b_tree::{BTreeLock, Key, Node, Range, Schema};
+use b_tree::{BTreeLock, Node, Range, Schema};
 
 const BLOCK_SIZE: usize = 4_096;
 
 enum File {
-    Node(Node<Vec<Key<i16>>>),
+    Node(Node<Vec<Vec<i16>>>),
 }
 
 #[async_trait]
@@ -36,7 +36,7 @@ impl<'en> en::ToStream<'en> for File {
     }
 }
 
-as_type!(File, Node, Node<Vec<Key<i16>>>);
+as_type!(File, Node, Node<Vec<Vec<i16>>>);
 
 #[derive(Debug)]
 struct ExampleSchema<T> {

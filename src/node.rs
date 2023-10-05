@@ -11,7 +11,6 @@ use uuid::Uuid;
 
 use super::range::Range;
 use super::Collator;
-use super::Key;
 
 const UUID_SIZE: usize = 16;
 
@@ -23,17 +22,17 @@ pub trait Block<V> {
     where
         C: Collate<Value = V>;
 
-    fn bisect_left<C>(&self, key: &Key<V>, collator: &Collator<C>) -> usize
+    fn bisect_left<C>(&self, key: &[V], collator: &Collator<C>) -> usize
     where
         C: Collate<Value = V>;
 
-    fn bisect_right<C>(&self, key: &Key<V>, collator: &Collator<C>) -> usize
+    fn bisect_right<C>(&self, key: &[V], collator: &Collator<C>) -> usize
     where
         C: Collate<Value = V>;
 }
 
-impl<V: fmt::Debug> Block<V> for Vec<Key<V>> {
-    type Key = Key<V>;
+impl<V: fmt::Debug> Block<V> for Vec<Vec<V>> {
+    type Key = Vec<V>;
 
     fn bisect<C>(&self, range: &Range<V>, collator: &Collator<C>) -> (usize, usize)
     where
@@ -89,7 +88,7 @@ impl<V: fmt::Debug> Block<V> for Vec<Key<V>> {
         (left, right)
     }
 
-    fn bisect_left<C>(&self, key: &Key<V>, collator: &Collator<C>) -> usize
+    fn bisect_left<C>(&self, key: &[V], collator: &Collator<C>) -> usize
     where
         C: Collate<Value = V>,
     {
@@ -98,7 +97,7 @@ impl<V: fmt::Debug> Block<V> for Vec<Key<V>> {
 
         while lo < hi {
             let mid = (lo + hi) >> 1;
-            match collator.cmp(&self[mid], key) {
+            match collator.cmp_slices(&self[mid], key) {
                 Ordering::Less => lo = mid + 1,
                 _ => hi = mid,
             }
@@ -107,7 +106,7 @@ impl<V: fmt::Debug> Block<V> for Vec<Key<V>> {
         lo
     }
 
-    fn bisect_right<C>(&self, key: &Key<V>, collator: &Collator<C>) -> usize
+    fn bisect_right<C>(&self, key: &[V], collator: &Collator<C>) -> usize
     where
         C: Collate<Value = V>,
     {
@@ -116,7 +115,7 @@ impl<V: fmt::Debug> Block<V> for Vec<Key<V>> {
 
         while lo < hi {
             let mid = (lo + hi) >> 1;
-            match collator.cmp(&self[mid], key) {
+            match collator.cmp_slices(&self[mid], key) {
                 Ordering::Greater => hi = mid,
                 _ => lo = mid + 1,
             }

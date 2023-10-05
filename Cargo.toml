@@ -31,6 +31,7 @@ log = { version = "0.4", features = ["release_max_level_info"], optional = true 
 num_cpus = "1.15"
 pin-project = "1.0"
 safecast = "0.2"
+smallvec = "1.11"
 uuid = "1.4"
 
 [dev-dependencies]
