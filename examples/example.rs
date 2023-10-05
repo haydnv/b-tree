@@ -77,7 +77,7 @@ impl<T: fmt::Debug> Schema for ExampleSchema<T> {
         5
     }
 
-    fn validate(&self, key: Vec<i16>) -> Result<Vec<i16>, io::Error> {
+    fn validate_key(&self, key: Vec<i16>) -> Result<Vec<i16>, io::Error> {
         if key.len() == self.size {
             Ok(key)
         } else {
@@ -147,14 +147,14 @@ async fn functional_test() -> Result<(), io::Error> {
 
             assert_eq!(view.count(&Range::from_prefix(vec![i])).await?, 1);
             assert_eq!(view.count(&Range::default()).await?, i as u64);
-
-            #[cfg(debug_assertions)]
-            assert!(view.is_valid().await?);
         }
     }
 
     {
         let view = btree.read().await;
+
+        #[cfg(debug_assertions)]
+        assert!(view.clone().is_valid().await?);
 
         let mut i = 1;
 
@@ -235,8 +235,6 @@ async fn functional_test() -> Result<(), io::Error> {
             assert!(!view.contains(&key).await?);
 
             if present {
-                #[cfg(debug_assertions)]
-                assert!(view.is_valid().await?);
                 count -= 1;
             }
 
@@ -246,6 +244,10 @@ async fn functional_test() -> Result<(), io::Error> {
 
     {
         let view = btree.try_read().expect("btree read");
+
+        #[cfg(debug_assertions)]
+        assert!(view.clone().is_valid().await?);
+
         assert_eq!(view.keys(Range::default(), false).try_next().await?, None);
     }
 

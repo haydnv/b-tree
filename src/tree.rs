@@ -521,7 +521,6 @@ where
                 Node::Leaf(keys) => {
                     assert!(keys.len() >= (order / 2) - 1);
                     assert!(keys.len() < order);
-                    // assert!(self.collator.is_sorted(&keys));
                 }
                 Node::Index(bounds, children) => {
                     assert_eq!(bounds.len(), children.len());
@@ -578,11 +577,9 @@ where
             match &*root {
                 Node::Leaf(keys) => {
                     assert!(keys.len() <= self.schema.order());
-                    // assert!(self.collator.is_sorted(&keys));
                 }
                 Node::Index(bounds, children) => {
                     assert_eq!(bounds.len(), children.len());
-                    // assert!(self.collator.is_sorted(bounds));
 
                     for (left, node_id) in bounds.iter().zip(children) {
                         let node = self.dir.as_dir().read_file(node_id).await?;
@@ -862,7 +859,7 @@ where
     Node<S::Value>: FileLoad,
 {
     /// Delete the given `key` from this B+Tree.
-    pub async fn delete(&mut self, key: &Key<S::Value>) -> Result<bool, S::Error> {
+    pub async fn delete(&mut self, key: &Key<S::Value>) -> Result<bool, io::Error> {
         let mut root = self.dir.write_file_owned(&ROOT).await?;
 
         let new_root = match &mut *root {
@@ -1211,12 +1208,12 @@ where
 
     /// Insert the given `key` into this B+Tree.
     /// Return `false` if te given `key` is already present.
-    pub async fn insert(&mut self, key: Key<S::Value>) -> Result<bool, S::Error> {
-        let key = self.schema.validate(key)?;
+    pub async fn insert(&mut self, key: Key<S::Value>) -> Result<bool, io::Error> {
+        let key = validate_key(&*self.schema, key)?;
         self.insert_root(key).await
     }
 
-    async fn insert_root(&mut self, key: Key<S::Value>) -> Result<bool, S::Error> {
+    async fn insert_root(&mut self, key: Key<S::Value>) -> Result<bool, io::Error> {
         let order = self.schema.order();
         let mut root = self.dir.write_file_owned(&ROOT).await?;
 
@@ -1230,8 +1227,6 @@ where
                 }
 
                 keys.insert(i, key);
-
-                // debug_assert!(self.collator.is_sorted(&keys));
 
                 if keys.len() > order {
                     let mid = div_ceil(order, 2);
@@ -1458,7 +1453,7 @@ where
     /// Merge the keys from the `other` B+Tree range into this one.
     ///
     /// The source B+Tree **must** have an identical schema and collation.
-    pub async fn merge<G>(&mut self, other: BTree<S, C, G>) -> Result<(), S::Error>
+    pub async fn merge<G>(&mut self, other: BTree<S, C, G>) -> Result<(), io::Error>
     where
         G: DirDeref<Entry = FE> + Clone + Send + Sync + 'static,
     {
@@ -1476,7 +1471,7 @@ where
     /// Delete the keys in the `other` B+Tree from this one.
     ///
     /// The source B+Tree **must** have an identical schema and collation.
-    pub async fn delete_all<G>(&mut self, other: BTree<S, C, G>) -> Result<(), S::Error>
+    pub async fn delete_all<G>(&mut self, other: BTree<S, C, G>) -> Result<(), io::Error>
     where
         G: DirDeref<Entry = FE> + Clone + Send + Sync + 'static,
     {
@@ -1490,6 +1485,13 @@ where
 
         Ok(())
     }
+}
+
+#[inline]
+fn validate_key<S: Schema>(schema: &S, key: Key<S::Value>) -> Result<Key<S::Value>, io::Error> {
+    schema
+        .validate_key(key)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))
 }
 
 #[inline]

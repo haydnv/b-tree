@@ -3,7 +3,7 @@
 //! See the `examples` directory for usage examples.
 
 use std::cmp::Ordering;
-use std::{fmt, io};
+use std::fmt;
 
 use collate::Collate;
 
@@ -69,8 +69,11 @@ impl<C> Eq for Collator<C> where C: Collate {}
 
 /// The schema of a B+Tree
 pub trait Schema: Eq + fmt::Debug {
-    type Error: std::error::Error + From<io::Error>;
-    type Value: Clone + Eq + Send + Sync + fmt::Debug + 'static;
+    /// The type of error returned by [`Schema::validate_key`]
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    /// The type of value stored in a B+Tree's keys
+    type Value: Default + Clone + Eq + Send + Sync + fmt::Debug + 'static;
 
     /// Get the maximum size in bytes of a leaf node in a B+Tree with this [`Schema`].
     fn block_size(&self) -> usize;
@@ -82,5 +85,5 @@ pub trait Schema: Eq + fmt::Debug {
     fn order(&self) -> usize;
 
     /// Return a validated version of the given `key`, or a validation error.
-    fn validate(&self, key: Key<Self::Value>) -> Result<Key<Self::Value>, Self::Error>;
+    fn validate_key(&self, key: Key<Self::Value>) -> Result<Key<Self::Value>, Self::Error>;
 }
