@@ -563,17 +563,18 @@ where
     Node<S::Value>: FileLoad + fmt::Debug,
 {
     /// Construct a [`Stream`] of all the keys in the given `range` of this B+Tree.
-    pub fn keys(
+    pub async fn keys(
         self,
         range: Range<S::Value>,
         reverse: bool,
-    ) -> impl Stream<Item = Result<Key<S::Value>, io::Error>> + Unpin + Send + Sized {
-        let range = range.into();
-
+    ) -> Result<
+        impl Stream<Item = Result<Key<S::Value>, io::Error>> + Unpin + Send + Sized,
+        io::Error,
+    > {
         if reverse {
-            keys_reverse(self.dir, self.collator, range, ROOT)
+            keys_reverse(self.dir, self.collator, range, ROOT).await
         } else {
-            keys_forward(self.dir, self.collator, range, ROOT)
+            keys_forward(self.dir, self.collator, range, ROOT).await
         }
     }
 
@@ -606,7 +607,7 @@ where
         let range = Range::default();
         let count = self.count(&range).await? as usize;
         let mut contents = Vec::with_capacity(count);
-        let mut stream = self.keys(range, false);
+        let mut stream = self.keys(range, false).await?;
         while let Some(key) = stream.try_next().await? {
             contents.push(key);
         }
@@ -622,7 +623,7 @@ fn keys_forward<C, V, FE, G>(
     collator: Collator<C>,
     range: Range<V>,
     node_id: Uuid,
-) -> IntoStream<V>
+) -> Pin<Box<dyn Future<Output = Result<IntoStream<V>, io::Error>> + Send>>
 where
     C: Collate<Value = V> + Clone + Send + Sync + 'static,
     V: Clone + PartialEq + fmt::Debug + Send + Sync + 'static,
@@ -634,14 +635,13 @@ where
     log::debug!("reading BTree keys in forward order");
 
     let file = dir.as_dir().get_file(&node_id).expect("node").clone();
-    let fut = file.into_read().map_ok(move |node| {
+    let fut = file.into_read().and_then(move |node| async move {
         #[cfg(feature = "logging")]
         log::debug!("locked node for reading");
 
         let keys: IntoStream<V> = match &*node {
             Node::Leaf(keys) if range.is_default() => {
                 let keys = keys.iter().map(stack_key).collect::<NodeStack<V>>();
-
                 Box::pin(stream::iter(keys).map(Ok))
             }
             Node::Leaf(keys) => {
@@ -657,7 +657,6 @@ where
                     }
                 } else {
                     let keys = keys[l..r].iter().map(stack_key).collect::<NodeStack<V>>();
-
                     Box::pin(stream::iter(keys).map(Ok))
                 }
             }
@@ -671,7 +670,8 @@ where
 
                         keys_forward(dir.clone(), collator.clone(), range.clone(), node_id)
                     })
-                    .flatten();
+                    .buffered(2)
+                    .try_flatten();
 
                 Box::pin(keys)
             }
@@ -681,17 +681,17 @@ where
 
                 if r == 0 {
                     let empty: IntoStream<V> = Box::pin(stream::empty());
-                    return empty;
+                    empty
                 } else if l == children.len() {
                     #[cfg(feature = "logging")]
                     log::debug!("reading keys from child node {}...", l - 1);
 
-                    keys_forward(dir, collator, range, children[l - 1])
+                    keys_forward(dir, collator, range, children[l - 1]).await?
                 } else if l == r || l + 1 == r {
                     #[cfg(feature = "logging")]
                     log::debug!("reading keys from child node {}...", l);
 
-                    keys_forward(dir, collator, range, children[l])
+                    keys_forward(dir, collator, range, children[l]).await?
                 } else {
                     #[cfg(feature = "logging")]
                     log::debug!("reading keys from child nodes {}..{}", l, r);
@@ -701,6 +701,8 @@ where
 
                     let right = keys_forward(dir.clone(), collator.clone(), range, children[r - 1]);
 
+                    let (left, right) = try_join!(left, right)?;
+
                     let children = SmallVec::<[Uuid; NODE_STACK_SIZE]>::from_slice(
                         &children[(l + 1)..(r - 1)],
                     );
@@ -709,17 +711,18 @@ where
                         .map(move |node_id| {
                             keys_forward(dir.clone(), collator.clone(), Range::default(), node_id)
                         })
-                        .flatten();
+                        .buffered(2)
+                        .try_flatten();
 
                     Box::pin(left.chain(middle).chain(right))
                 }
             }
         };
 
-        keys
+        Ok(keys)
     });
 
-    Box::pin(stream::once(fut).try_flatten())
+    Box::pin(fut)
 }
 
 fn keys_reverse<C, V, FE, G>(
@@ -727,7 +730,7 @@ fn keys_reverse<C, V, FE, G>(
     collator: Collator<C>,
     range: Range<V>,
     node_id: Uuid,
-) -> IntoStream<V>
+) -> Pin<Box<dyn Future<Output = Result<IntoStream<V>, io::Error>> + Send>>
 where
     C: Collate<Value = V> + Clone + Send + Sync + 'static,
     V: Clone + PartialEq + fmt::Debug + Send + Sync + 'static,
@@ -736,11 +739,10 @@ where
     Node<V>: FileLoad,
 {
     let file = dir.as_dir().get_file(&node_id).expect("node").clone();
-    let fut = file.into_read().map_ok(move |node| {
+    let fut = file.into_read().and_then(move |node| async move {
         let keys: IntoStream<V> = match &*node {
             Node::Leaf(keys) if range.is_default() => {
                 let keys = keys.iter().rev().map(stack_key).collect::<NodeStack<V>>();
-
                 Box::pin(stream::iter(keys.into_iter().map(Ok)))
             }
             Node::Leaf(keys) => {
@@ -775,7 +777,8 @@ where
                     .map(move |node_id| {
                         keys_reverse(dir.clone(), collator.clone(), range.clone(), node_id)
                     })
-                    .flatten();
+                    .buffered(2)
+                    .try_flatten();
 
                 Box::pin(keys)
             }
@@ -785,16 +788,18 @@ where
 
                 if r == 0 {
                     let empty: IntoStream<V> = Box::pin(stream::empty());
-                    return empty;
+                    empty
                 } else if l == children.len() {
-                    keys_reverse(dir, collator, range, children[l - 1])
+                    keys_reverse(dir, collator, range, children[l - 1]).await?
                 } else if l == r || l + 1 == r {
-                    keys_reverse(dir, collator, range, children[l])
+                    keys_reverse(dir, collator, range, children[l]).await?
                 } else {
                     let left =
                         keys_reverse(dir.clone(), collator.clone(), range.clone(), children[l]);
 
                     let right = keys_reverse(dir.clone(), collator.clone(), range, children[r - 1]);
+
+                    let (left, right) = try_join!(left, right)?;
 
                     let middle_children = children[(l + 1)..(r - 1)]
                         .iter()
@@ -806,17 +811,18 @@ where
                         .map(move |node_id| {
                             keys_reverse(dir.clone(), collator.clone(), Range::default(), node_id)
                         })
-                        .flatten();
+                        .buffered(2)
+                        .try_flatten();
 
                     Box::pin(right.chain(middle).chain(left))
                 }
             }
         };
 
-        keys
+        Ok(keys)
     });
 
-    Box::pin(stream::once(fut).try_flatten())
+    Box::pin(fut)
 }
 
 enum MergeIndexLeft<V> {
@@ -1472,7 +1478,7 @@ where
         validate_collator_eq(&self.collator, &other.collator)?;
         validate_schema_eq(&self.schema, &other.schema)?;
 
-        let mut keys = other.keys(Range::default(), false);
+        let mut keys = other.keys(Range::default(), false).await?;
         while let Some(key) = keys.try_next().await? {
             self.insert_root(key.into_vec()).await?;
         }
@@ -1490,7 +1496,7 @@ where
         validate_collator_eq(&self.collator, &other.collator)?;
         validate_schema_eq(&self.schema, &other.schema)?;
 
-        let mut keys = other.keys(Range::default(), false);
+        let mut keys = other.keys(Range::default(), false).await?;
         while let Some(key) = keys.try_next().await? {
             self.delete(&key).await?;
         }
