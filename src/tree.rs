@@ -37,11 +37,14 @@ const ROOT: Uuid = Uuid::from_fields(0, 0, 0, &[0u8; 8]);
 /// A futures-aware read-write lock on a [`BTree`]
 pub struct BTreeLock<S, C, FE> {
     schema: Arc<S>,
-    collator: Arc<Collator<C>>,
+    collator: Collator<C>,
     dir: DirLock<FE>,
 }
 
-impl<S, C, FE> Clone for BTreeLock<S, C, FE> {
+impl<S, C, FE> Clone for BTreeLock<S, C, FE>
+where
+    C: Clone,
+{
     fn clone(&self) -> Self {
         Self {
             schema: self.schema.clone(),
@@ -53,7 +56,7 @@ impl<S, C, FE> Clone for BTreeLock<S, C, FE> {
 
 impl<S, C, FE> BTreeLock<S, C, FE> {
     /// Borrow the [`Collator`] used by this B+Tree.
-    pub fn collator(&self) -> &Arc<Collator<C>> {
+    pub fn collator(&self) -> &Collator<C> {
         &self.collator
     }
 
@@ -72,7 +75,7 @@ where
     fn new(schema: S, collator: C, dir: DirLock<FE>) -> Self {
         Self {
             schema: Arc::new(schema),
-            collator: Arc::new(Collator::new(collator)),
+            collator: Collator::new(collator),
             dir,
         }
     }
@@ -115,6 +118,7 @@ where
 
 impl<S, C, FE> BTreeLock<S, C, FE>
 where
+    C: Clone,
     FE: Send + Sync,
 {
     /// Lock this B+Tree for reading, without borrowing.
@@ -208,7 +212,7 @@ struct BTreeVisitor<S, C, FE> {
 impl<S, C, FE> de::Visitor for BTreeVisitor<S, C, FE>
 where
     S: Schema + Send + Sync,
-    C: Collate<Value = S::Value> + Send + Sync,
+    C: Collate<Value = S::Value> + Clone + Send + Sync,
     FE: AsType<Node<S::Value>> + Send + Sync,
     S::Value: de::FromStream<Context = ()>,
     Node<S::Value>: FileLoad,
@@ -235,7 +239,7 @@ where
 impl<S, C, FE> de::FromStream for BTreeLock<S, C, FE>
 where
     S: Schema + Send + Sync,
-    C: Collate<Value = S::Value> + Send + Sync,
+    C: Collate<Value = S::Value> + Clone + Send + Sync,
     FE: AsType<Node<S::Value>> + Send + Sync,
     S::Value: de::FromStream<Context = ()>,
     Node<S::Value>: FileLoad,
@@ -257,12 +261,13 @@ type IntoStream<V> = Pin<Box<dyn Stream<Item = Result<Key<V>, io::Error>> + Send
 /// A B+Tree
 pub struct BTree<S, C, G> {
     schema: Arc<S>,
-    collator: Arc<Collator<C>>,
+    collator: Collator<C>,
     dir: G,
 }
 
 impl<S, C, G> Clone for BTree<S, C, G>
 where
+    C: Clone,
     G: Clone,
 {
     fn clone(&self) -> Self {
@@ -300,7 +305,7 @@ where
         loop {
             match &*node {
                 Node::Leaf(keys) => {
-                    let i = keys.bisect_left(&key, &*self.collator);
+                    let i = keys.bisect_left(&key, &self.collator);
 
                     break Ok(if i < keys.len() {
                         match keys.get(i) {
@@ -312,7 +317,7 @@ where
                     });
                 }
                 Node::Index(bounds, children) => {
-                    let i = bounds.bisect_right(key, &*self.collator);
+                    let i = bounds.bisect_right(key, &self.collator);
 
                     if i == 0 {
                         return Ok(false);
@@ -339,12 +344,12 @@ where
             match &*node {
                 Node::Leaf(keys) if range.is_default() => Ok(keys.len() as u64),
                 Node::Leaf(keys) => {
-                    let (l, r) = keys.bisect(range, &*self.collator);
+                    let (l, r) = keys.bisect(range, &self.collator);
 
                     if l == keys.len() {
                         Ok(0)
                     } else if l == r {
-                        if range.contains_value(&keys[l], &*self.collator) {
+                        if range.contains_value(&keys[l], &self.collator) {
                             Ok(1)
                         } else {
                             Ok(0)
@@ -362,7 +367,7 @@ where
                         .await
                 }
                 Node::Index(bounds, children) => {
-                    let (l, r) = bounds.bisect(range, &*self.collator);
+                    let (l, r) = bounds.bisect(range, &self.collator);
                     let l = if l == 0 { l } else { l - 1 };
 
                     if l == children.len() {
@@ -495,11 +500,11 @@ where
         Ok(loop {
             match &*node {
                 Node::Leaf(keys) => {
-                    let (l, r) = keys.bisect(range, &*self.collator);
+                    let (l, r) = keys.bisect(range, &self.collator);
                     break l == r;
                 }
                 Node::Index(bounds, children) => {
-                    let (l, r) = bounds.bisect(range, &*self.collator);
+                    let (l, r) = bounds.bisect(range, &self.collator);
 
                     if l == children.len() {
                         node = self.dir.as_dir().read_file(&children[l - 1]).await?;
@@ -552,7 +557,7 @@ where
 impl<S, C, FE, G> BTree<S, C, G>
 where
     S: Schema,
-    C: Collate<Value = S::Value> + Send + Sync + 'static,
+    C: Collate<Value = S::Value> + Clone + Send + Sync + 'static,
     FE: AsType<Node<S::Value>> + Send + Sync + 'static,
     G: DirDeref<Entry = FE> + Clone + Send + Sync + 'static,
     Node<S::Value>: FileLoad + fmt::Debug,
@@ -614,12 +619,12 @@ where
 
 fn keys_forward<C, V, FE, G>(
     dir: G,
-    collator: Arc<Collator<C>>,
+    collator: Collator<C>,
     range: Arc<Range<V>>,
     node_id: Uuid,
 ) -> IntoStream<V>
 where
-    C: Collate<Value = V> + Send + Sync + 'static,
+    C: Collate<Value = V> + Clone + Send + Sync + 'static,
     V: Clone + PartialEq + fmt::Debug + Send + Sync + 'static,
     FE: AsType<Node<V>> + Send + Sync + 'static,
     G: DirDeref<Entry = FE> + Clone + Send + Sync + 'static,
@@ -640,12 +645,12 @@ where
                 Box::pin(stream::iter(keys).map(Ok))
             }
             Node::Leaf(keys) => {
-                let (l, r) = keys.bisect(&*range, &*collator);
+                let (l, r) = keys.bisect(&*range, &collator);
 
                 if l == keys.len() || r == 0 {
                     Box::pin(stream::empty())
                 } else if l == r {
-                    if range.contains_value(&keys[l], &*collator) {
+                    if range.contains_value(&keys[l], &collator) {
                         Box::pin(stream::once(future::ready(Ok(stack_key(&keys[l])))))
                     } else {
                         Box::pin(stream::empty())
@@ -671,7 +676,7 @@ where
                 Box::pin(keys)
             }
             Node::Index(bounds, children) => {
-                let (l, r) = bounds.bisect(&*range, &*collator);
+                let (l, r) = bounds.bisect(&*range, &collator);
                 let l = if l == 0 { l } else { l - 1 };
 
                 if r == 0 {
@@ -726,12 +731,12 @@ where
 
 fn keys_reverse<C, V, FE, G>(
     dir: G,
-    collator: Arc<Collator<C>>,
+    collator: Collator<C>,
     range: Arc<Range<V>>,
     node_id: Uuid,
 ) -> IntoStream<V>
 where
-    C: Collate<Value = V> + Send + Sync + 'static,
+    C: Collate<Value = V> + Clone + Send + Sync + 'static,
     V: Clone + PartialEq + fmt::Debug + Send + Sync + 'static,
     FE: AsType<Node<V>> + Send + Sync + 'static,
     G: DirDeref<Entry = FE> + Clone + Send + Sync + 'static,
@@ -746,12 +751,12 @@ where
                 Box::pin(stream::iter(keys.into_iter().map(Ok)))
             }
             Node::Leaf(keys) => {
-                let (l, r) = keys.bisect(&*range, &*collator);
+                let (l, r) = keys.bisect(&*range, &collator);
 
                 if l == keys.len() || r == 0 {
                     Box::pin(stream::empty())
                 } else if l == r {
-                    if range.contains_value(&keys[l], &*collator) {
+                    if range.contains_value(&keys[l], &collator) {
                         Box::pin(stream::once(future::ready(Ok(stack_key(&keys[l])))))
                     } else {
                         Box::pin(stream::empty())
@@ -782,7 +787,7 @@ where
                 Box::pin(keys)
             }
             Node::Index(bounds, children) => {
-                let (l, r) = bounds.bisect(&*range, &*collator);
+                let (l, r) = bounds.bisect(&*range, &collator);
                 let l = if l == 0 { l } else { l - 1 };
 
                 if r == 0 {
@@ -887,7 +892,7 @@ where
 
         let new_root = match &mut *root {
             Node::Leaf(keys) => {
-                let i = keys.bisect_left(&key, &*self.collator);
+                let i = keys.bisect_left(&key, &self.collator);
                 if i < keys.len() && &keys[i] == key {
                     keys.remove(i);
                     return Ok(true);
@@ -896,7 +901,7 @@ where
                 }
             }
             Node::Index(bounds, children) => {
-                let i = match bounds.bisect_right(&key, &*self.collator) {
+                let i = match bounds.bisect_right(&key, &self.collator) {
                     0 => return Ok(false),
                     i => i - 1,
                 };
@@ -956,7 +961,7 @@ where
         Box::pin(async move {
             match &mut *node {
                 Node::Leaf(keys) => {
-                    let i = keys.bisect_left(&key, &*self.collator);
+                    let i = keys.bisect_left(&key, &self.collator);
 
                     if i < keys.len() && &keys[i] == key {
                         keys.remove(i);
@@ -973,7 +978,7 @@ where
                     }
                 }
                 Node::Index(bounds, children) => {
-                    let i = match bounds.bisect_right(key, &*self.collator) {
+                    let i = match bounds.bisect_right(key, &self.collator) {
                         0 => return Ok(Delete::None),
                         i => i - 1,
                     };
@@ -1242,7 +1247,7 @@ where
 
         let new_root = match &mut *root {
             Node::Leaf(keys) => {
-                let i = keys.bisect_left(&key, &*self.collator);
+                let i = keys.bisect_left(&key, &self.collator);
 
                 if keys.get(i) == Some(&key) {
                     // no-op
@@ -1275,7 +1280,7 @@ where
             Node::Index(bounds, children) => {
                 debug_assert_eq!(bounds.len(), children.len());
 
-                let i = match bounds.bisect_left(&key, &*self.collator) {
+                let i = match bounds.bisect_left(&key, &self.collator) {
                     0 => 0,
                     i => i - 1,
                 };
@@ -1346,7 +1351,7 @@ where
 
             match node {
                 Node::Leaf(keys) => {
-                    let i = keys.bisect_left(&key, &*self.collator);
+                    let i = keys.bisect_left(&key, &self.collator);
 
                     if i < keys.len() && keys[i] == key {
                         // no-op
@@ -1391,7 +1396,7 @@ where
                     debug_assert_eq!(bounds.len(), children.len());
                     let size = self.schema.block_size() >> 1;
 
-                    let i = match bounds.bisect_left(&key, &*self.collator) {
+                    let i = match bounds.bisect_left(&key, &self.collator) {
                         0 => 0,
                         i => i - 1,
                     };
@@ -1467,7 +1472,7 @@ where
 impl<S, C, FE> BTree<S, C, DirWriteGuardOwned<FE>>
 where
     S: Schema + Send + Sync,
-    C: Collate<Value = S::Value> + Send + Sync + 'static,
+    C: Collate<Value = S::Value> + Clone + Send + Sync + 'static,
     FE: AsType<Node<S::Value>> + Send + Sync + 'static,
     Node<S::Value>: FileLoad,
 {
