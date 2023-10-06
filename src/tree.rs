@@ -563,9 +563,9 @@ where
     Node<S::Value>: FileLoad + fmt::Debug,
 {
     /// Construct a [`Stream`] of all the keys in the given `range` of this B+Tree.
-    pub fn keys<R: Into<Arc<Range<S::Value>>>>(
+    pub fn keys(
         self,
-        range: R,
+        range: Range<S::Value>,
         reverse: bool,
     ) -> impl Stream<Item = Result<Key<S::Value>, io::Error>> + Unpin + Send + Sized {
         let range = range.into();
@@ -620,7 +620,7 @@ where
 fn keys_forward<C, V, FE, G>(
     dir: G,
     collator: Collator<C>,
-    range: Arc<Range<V>>,
+    range: Range<V>,
     node_id: Uuid,
 ) -> IntoStream<V>
 where
@@ -645,7 +645,7 @@ where
                 Box::pin(stream::iter(keys).map(Ok))
             }
             Node::Leaf(keys) => {
-                let (l, r) = keys.bisect(&*range, &collator);
+                let (l, r) = keys.bisect(&range, &collator);
 
                 if l == keys.len() || r == 0 {
                     Box::pin(stream::empty())
@@ -676,7 +676,7 @@ where
                 Box::pin(keys)
             }
             Node::Index(bounds, children) => {
-                let (l, r) = bounds.bisect(&*range, &collator);
+                let (l, r) = bounds.bisect(&range, &collator);
                 let l = if l == 0 { l } else { l - 1 };
 
                 if r == 0 {
@@ -701,20 +701,13 @@ where
 
                     let right = keys_forward(dir.clone(), collator.clone(), range, children[r - 1]);
 
-                    let default_range = Arc::new(Range::default());
-
                     let children = SmallVec::<[Uuid; NODE_STACK_SIZE]>::from_slice(
                         &children[(l + 1)..(r - 1)],
                     );
 
                     let middle = stream::iter(children)
                         .map(move |node_id| {
-                            keys_forward(
-                                dir.clone(),
-                                collator.clone(),
-                                default_range.clone(),
-                                node_id,
-                            )
+                            keys_forward(dir.clone(), collator.clone(), Range::default(), node_id)
                         })
                         .flatten();
 
@@ -732,7 +725,7 @@ where
 fn keys_reverse<C, V, FE, G>(
     dir: G,
     collator: Collator<C>,
-    range: Arc<Range<V>>,
+    range: Range<V>,
     node_id: Uuid,
 ) -> IntoStream<V>
 where
@@ -751,7 +744,7 @@ where
                 Box::pin(stream::iter(keys.into_iter().map(Ok)))
             }
             Node::Leaf(keys) => {
-                let (l, r) = keys.bisect(&*range, &collator);
+                let (l, r) = keys.bisect(&range, &collator);
 
                 if l == keys.len() || r == 0 {
                     Box::pin(stream::empty())
@@ -787,7 +780,7 @@ where
                 Box::pin(keys)
             }
             Node::Index(bounds, children) => {
-                let (l, r) = bounds.bisect(&*range, &collator);
+                let (l, r) = bounds.bisect(&range, &collator);
                 let l = if l == 0 { l } else { l - 1 };
 
                 if r == 0 {
@@ -803,8 +796,6 @@ where
 
                     let right = keys_reverse(dir.clone(), collator.clone(), range, children[r - 1]);
 
-                    let default_range = Arc::new(Range::default());
-
                     let middle_children = children[(l + 1)..(r - 1)]
                         .iter()
                         .rev()
@@ -813,12 +804,7 @@ where
 
                     let middle = stream::iter(middle_children)
                         .map(move |node_id| {
-                            keys_reverse(
-                                dir.clone(),
-                                collator.clone(),
-                                default_range.clone(),
-                                node_id,
-                            )
+                            keys_reverse(dir.clone(), collator.clone(), Range::default(), node_id)
                         })
                         .flatten();
 

@@ -3,13 +3,14 @@ use std::fmt;
 use std::ops::{Bound, Range as Bounds};
 
 use collate::{Collate, Overlap, OverlapsRange, OverlapsValue};
+use smallvec::smallvec;
 
-use super::Collator;
+use super::{Collator, Key};
 
 /// A range used to select a slice of a `BTree`
 #[derive(Clone, Eq, PartialEq)]
 pub struct Range<V> {
-    prefix: Vec<V>,
+    prefix: Key<V>,
     start: Bound<V>,
     end: Bound<V>,
 }
@@ -17,7 +18,7 @@ pub struct Range<V> {
 impl<V> Default for Range<V> {
     fn default() -> Self {
         Self {
-            prefix: vec![],
+            prefix: smallvec![],
             start: Bound::Unbounded,
             end: Bound::Unbounded,
         }
@@ -26,28 +27,29 @@ impl<V> Default for Range<V> {
 
 impl<V> Range<V> {
     /// Construct a new [`Range`] with the given `prefix`.
-    pub fn with_bounds(prefix: Vec<V>, bounds: (Bound<V>, Bound<V>)) -> Self {
+    pub fn with_bounds<K: Into<Key<V>>>(prefix: K, bounds: (Bound<V>, Bound<V>)) -> Self {
+        let prefix = prefix.into();
         let (start, end) = bounds;
         Self { prefix, start, end }
     }
 
     /// Construct a new [`Range`] with the given `prefix`.
-    pub fn with_range(prefix: Vec<V>, range: Bounds<V>) -> Self {
+    pub fn with_range<K: Into<Key<V>>>(prefix: K, range: Bounds<V>) -> Self {
         let Bounds { start, end } = range;
         Self::with_bounds(prefix, (Bound::Included(start), Bound::Excluded(end)))
     }
 
     /// Construct a new [`Range`] with only the given `prefix`.
-    pub fn from_prefix(prefix: Vec<V>) -> Self {
+    pub fn from_prefix<K: Into<Key<V>>>(prefix: K) -> Self {
         Self {
-            prefix,
+            prefix: prefix.into(),
             start: Bound::Unbounded,
             end: Bound::Unbounded,
         }
     }
 
     /// Destructure this [`Range`] into a prefix and [`Bound`]s.
-    pub fn into_inner(self) -> (Vec<V>, (Bound<V>, Bound<V>)) {
+    pub fn into_inner(self) -> (Key<V>, (Bound<V>, Bound<V>)) {
         (self.prefix, (self.start, self.end))
     }
 
@@ -87,7 +89,7 @@ where
     C::Value: fmt::Debug,
 {
     fn overlaps_value(&self, key: &Vec<C::Value>, collator: &Collator<C>) -> Overlap {
-        match collator.cmp(&self.prefix, key) {
+        match collator.cmp_slices(&self.prefix, key) {
             Ordering::Less => Overlap::Less,
             Ordering::Greater => Overlap::Greater,
             Ordering::Equal if self.prefix.len() >= key.len() => Overlap::Narrow,
@@ -174,7 +176,7 @@ impl<C: Collate> OverlapsRange<Range<C::Value>, Collator<C>> for Range<C::Value>
             }
         }
 
-        match collator.cmp(&self.prefix, &other.prefix) {
+        match collator.cmp_slices(&self.prefix, &other.prefix) {
             Ordering::Less => return Overlap::Less,
             Ordering::Greater => return Overlap::Greater,
             Ordering::Equal => match self.prefix.len().cmp(&other.prefix.len()) {
@@ -215,7 +217,7 @@ impl<C: Collate> OverlapsRange<Range<C::Value>, Collator<C>> for Range<C::Value>
     }
 }
 
-impl<V, K: Into<Vec<V>>> From<(K, Bounds<V>)> for Range<V> {
+impl<V, K: Into<Key<V>>> From<(K, Bounds<V>)> for Range<V> {
     fn from(tuple: (K, Bounds<V>)) -> Self {
         let (prefix, suffix) = tuple;
         let Bounds { start, end } = suffix;
