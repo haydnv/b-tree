@@ -29,6 +29,9 @@ pub type BTreeReadGuard<S, C, FE> = BTree<S, C, Arc<DirReadGuardOwned<FE>>>;
 /// A write guard acquired on a [`BTreeLock`]
 pub type BTreeWriteGuard<S, C, FE> = BTree<S, C, DirWriteGuardOwned<FE>>;
 
+/// A stream of [`Key`]s in a [`BTree`]
+pub type Keys<V> = Pin<Box<dyn Stream<Item = Result<Key<V>, io::Error>> + Send>>;
+
 // TODO: genericize
 type Node<V> = super::node::Node<Vec<Vec<V>>>;
 
@@ -567,10 +570,7 @@ where
         self,
         range: Range<S::Value>,
         reverse: bool,
-    ) -> Result<
-        impl Stream<Item = Result<Key<S::Value>, io::Error>> + Unpin + Send + Sized,
-        io::Error,
-    > {
+    ) -> Result<Keys<S::Value>, io::Error> {
         if reverse {
             keys_reverse(self.dir, self.collator, range, ROOT).await
         } else {

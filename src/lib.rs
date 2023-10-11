@@ -13,7 +13,7 @@ mod tree;
 
 pub use node::{Block, Node};
 pub use range::Range;
-pub use tree::{BTree, BTreeLock, BTreeReadGuard, BTreeWriteGuard};
+pub use tree::{BTree, BTreeLock, BTreeReadGuard, BTreeWriteGuard, Keys};
 
 pub use collate;
 
