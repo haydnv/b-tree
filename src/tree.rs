@@ -598,15 +598,16 @@ where
             let nodes = nodes_reverse(self.dir, self.collator, range, ROOT).await?;
 
             let keys = nodes
-                .map_ok(|leaf| {
+                .map_ok(|leaf| async move {
                     let mut keys = NodeStack::with_capacity(leaf.as_ref().len());
 
                     for key in leaf.as_ref().into_iter().rev() {
                         keys.push(key.into_iter().cloned().collect());
                     }
 
-                    stream::iter(keys).map(Ok)
+                    Ok(stream::iter(keys).map(Ok))
                 })
+                .try_buffered(num_cpus::get())
                 .try_flatten();
 
             Ok(Box::pin(keys))
@@ -614,15 +615,16 @@ where
             let nodes = nodes_forward(self.dir, self.collator, range, ROOT).await?;
 
             let keys = nodes
-                .map_ok(|leaf| {
+                .map_ok(|leaf| async move {
                     let mut keys = NodeStack::with_capacity(leaf.as_ref().len());
 
                     for key in leaf.as_ref() {
                         keys.push(key.into_iter().cloned().collect());
                     }
 
-                    stream::iter(keys).map(Ok)
+                    Ok(stream::iter(keys).map(Ok))
                 })
+                .try_buffered(num_cpus::get())
                 .try_flatten();
 
             Ok(Box::pin(keys))
