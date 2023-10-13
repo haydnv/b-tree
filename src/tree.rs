@@ -21,6 +21,7 @@ use super::range::Range;
 use super::{Collator, Key, Schema};
 
 const NODE_STACK_SIZE: usize = 32;
+
 type NodeStack<V> = SmallVec<[Key<V>; NODE_STACK_SIZE]>;
 
 /// A read guard acquired on a [`BTreeLock`]
@@ -32,9 +33,10 @@ pub type BTreeWriteGuard<S, C, FE> = BTree<S, C, DirWriteGuardOwned<FE>>;
 /// A stream of [`Key`]s in a [`BTree`]
 pub type Keys<V> = Pin<Box<dyn Stream<Item = Result<Key<V>, io::Error>> + Send>>;
 
-type Node<V> = super::node::Node<Vec<Vec<V>>>;
-
+/// A stream of [`Leaf`] nodes in a [`BTree`]
 type Nodes<FE, V> = Pin<Box<dyn Stream<Item = Result<Leaf<FE, V>, io::Error>> + Send>>;
+
+type Node<V> = super::node::Node<Vec<Vec<V>>>;
 
 const ROOT: Uuid = Uuid::from_fields(0, 0, 0, &[0u8; 8]);
 
@@ -281,8 +283,6 @@ where
         decoder.decode_seq(BTreeVisitor { btree }).await
     }
 }
-
-type IntoStream<V> = Pin<Box<dyn Stream<Item = Result<Key<V>, io::Error>> + Send>>;
 
 /// A B+Tree
 pub struct BTree<S, C, G> {
@@ -595,7 +595,21 @@ where
         reverse: bool,
     ) -> Result<Keys<S::Value>, io::Error> {
         if reverse {
-            keys_reverse(self.dir, self.collator, range, ROOT).await
+            let nodes = nodes_reverse(self.dir, self.collator, range, ROOT).await?;
+
+            let keys = nodes
+                .map_ok(|leaf| {
+                    let mut keys = NodeStack::with_capacity(leaf.as_ref().len());
+
+                    for key in leaf.as_ref().into_iter().rev() {
+                        keys.push(key.into_iter().cloned().collect());
+                    }
+
+                    stream::iter(keys).map(Ok)
+                })
+                .try_flatten();
+
+            Ok(Box::pin(keys))
         } else {
             let nodes = nodes_forward(self.dir, self.collator, range, ROOT).await?;
 
@@ -655,104 +669,11 @@ where
     }
 }
 
-fn keys_reverse<C, V, FE, G>(
-    dir: G,
-    collator: Collator<C>,
-    range: Range<V>,
-    node_id: Uuid,
-) -> Pin<Box<dyn Future<Output = Result<IntoStream<V>, io::Error>> + Send>>
-where
-    C: Collate<Value = V> + Clone + Send + Sync + 'static,
-    V: Clone + PartialEq + fmt::Debug + Send + Sync + 'static,
-    FE: AsType<Node<V>> + Send + Sync + 'static,
-    G: DirDeref<Entry = FE> + Clone + Send + Sync + 'static,
-    Node<V>: FileLoad,
-{
-    let file = dir.as_dir().get_file(&node_id).expect("node").clone();
-    let fut = file.into_read().and_then(move |node| async move {
-        let keys: IntoStream<V> = match &*node {
-            Node::Leaf(keys) if range.is_default() => {
-                let keys = keys.iter().rev().map(stack_key).collect::<NodeStack<V>>();
-                Box::pin(stream::iter(keys.into_iter().map(Ok)))
-            }
-            Node::Leaf(keys) => {
-                let (l, r) = keys.bisect(&range, &collator);
-
-                if l == keys.len() || r == 0 {
-                    Box::pin(stream::empty())
-                } else if l == r {
-                    if range.contains_value(&keys[l], &collator) {
-                        Box::pin(stream::once(future::ready(Ok(stack_key(&keys[l])))))
-                    } else {
-                        Box::pin(stream::empty())
-                    }
-                } else {
-                    let keys = keys[l..r]
-                        .iter()
-                        .rev()
-                        .map(stack_key)
-                        .collect::<NodeStack<V>>();
-
-                    Box::pin(stream::iter(keys.into_iter().map(Ok)))
-                }
-            }
-            Node::Index(_bounds, children) if range.is_default() => {
-                let children = children
-                    .iter()
-                    .rev()
-                    .copied()
-                    .collect::<SmallVec<[Uuid; NODE_STACK_SIZE]>>();
-
-                let keys = stream::iter(children)
-                    .map(move |node_id| {
-                        keys_reverse(dir.clone(), collator.clone(), range.clone(), node_id)
-                    })
-                    .buffered(2)
-                    .try_flatten();
-
-                Box::pin(keys)
-            }
-            Node::Index(bounds, children) => {
-                let (l, r) = bounds.bisect(&range, &collator);
-                let l = if l == 0 { l } else { l - 1 };
-
-                if r == 0 {
-                    let empty: IntoStream<V> = Box::pin(stream::empty());
-                    empty
-                } else if l == children.len() {
-                    keys_reverse(dir, collator, range, children[l - 1]).await?
-                } else if l == r || l + 1 == r {
-                    keys_reverse(dir, collator, range, children[l]).await?
-                } else {
-                    let left =
-                        keys_reverse(dir.clone(), collator.clone(), range.clone(), children[l]);
-
-                    let right = keys_reverse(dir.clone(), collator.clone(), range, children[r - 1]);
-
-                    let (left, right) = try_join!(left, right)?;
-
-                    let middle_children = children[(l + 1)..(r - 1)]
-                        .iter()
-                        .rev()
-                        .copied()
-                        .collect::<SmallVec<[Uuid; NODE_STACK_SIZE]>>();
-
-                    let middle = stream::iter(middle_children)
-                        .map(move |node_id| {
-                            keys_reverse(dir.clone(), collator.clone(), Range::default(), node_id)
-                        })
-                        .buffered(2)
-                        .try_flatten();
-
-                    Box::pin(right.chain(middle).chain(left))
-                }
-            }
-        };
-
-        Ok(keys)
-    });
-
-    Box::pin(fut)
+enum NodeRead {
+    Excluded,
+    Child(Uuid),
+    Children(SmallVec<[Uuid; NODE_STACK_SIZE]>),
+    Leaf((usize, usize)),
 }
 
 fn nodes_forward<C, V, FE, G>(
@@ -771,15 +692,8 @@ where
     #[cfg(feature = "logging")]
     log::debug!("reading BTree keys in forward order");
 
-    enum NodeRead {
-        Excluded,
-        Child(Uuid),
-        Children(SmallVec<[Uuid; NODE_STACK_SIZE]>),
-        Leaf((usize, usize)),
-    }
-
     let file = dir.as_dir().get_file(&node_id).expect("node").clone();
-    let fut = file.into_read().and_then(move |node| async move {
+    let fut = file.into_read().map_ok(move |node| {
         let read = match &*node {
             Node::Leaf(keys) if range.is_default() => NodeRead::Leaf((0, keys.len())),
             Node::Leaf(keys) => {
@@ -798,7 +712,13 @@ where
                 }
             }
             Node::Index(_bounds, children) if range.is_default() => {
-                NodeRead::Children(SmallVec::from_slice(&children))
+                debug_assert!(!children.is_empty());
+
+                if children.len() == 1 {
+                    NodeRead::Child(children[0])
+                } else {
+                    NodeRead::Children(SmallVec::from_slice(&children))
+                }
             }
             Node::Index(bounds, children) => {
                 let (l, r) = bounds.bisect(&range, &collator);
@@ -848,7 +768,104 @@ where
             }
         };
 
-        Ok(nodes)
+        nodes
+    });
+
+    Box::pin(fut)
+}
+
+fn nodes_reverse<C, V, FE, G>(
+    dir: G,
+    collator: Collator<C>,
+    range: Range<V>,
+    node_id: Uuid,
+) -> Pin<Box<dyn Future<Output = Result<Nodes<FE, V>, io::Error>> + Send>>
+where
+    C: Collate<Value = V> + Clone + Send + Sync + 'static,
+    V: Clone + PartialEq + fmt::Debug + Send + Sync + 'static,
+    FE: AsType<Node<V>> + Send + Sync + 'static,
+    G: DirDeref<Entry = FE> + Clone + Send + Sync + 'static,
+    Node<V>: FileLoad,
+{
+    let file = dir.as_dir().get_file(&node_id).expect("node").clone();
+    let fut = file.into_read().map_ok(move |node| {
+        let read = match &*node {
+            Node::Leaf(keys) if range.is_default() => NodeRead::Leaf((0, keys.len())),
+            Node::Leaf(keys) => {
+                let (l, r) = keys.bisect(&range, &collator);
+
+                if l == keys.len() || r == 0 {
+                    NodeRead::Excluded
+                } else if l == r {
+                    if range.contains_value(&keys[l], &collator) {
+                        NodeRead::Leaf((l, l + 1))
+                    } else {
+                        NodeRead::Excluded
+                    }
+                } else {
+                    NodeRead::Leaf((l, r))
+                }
+            }
+            Node::Index(_bounds, children) if range.is_default() => {
+                debug_assert!(!children.is_empty());
+
+                if children.len() == 1 {
+                    NodeRead::Child(children[0])
+                } else {
+                    NodeRead::Children(SmallVec::from_slice(&children))
+                }
+            }
+            Node::Index(bounds, children) => {
+                debug_assert!(!children.is_empty());
+
+                let (l, r) = bounds.bisect(&range, &collator);
+                let l = if l == 0 { l } else { l - 1 };
+
+                if r == 0 {
+                    NodeRead::Excluded
+                } else if l == children.len() {
+                    NodeRead::Child(children[l - 1])
+                } else if l == r || l + 1 == r {
+                    NodeRead::Child(children[l])
+                } else {
+                    NodeRead::Children(SmallVec::from_slice(&children[l..r]))
+                }
+            }
+        };
+
+        let nodes: Nodes<FE, V> = match read {
+            NodeRead::Excluded => {
+                let nodes = stream::empty();
+                Box::pin(nodes)
+            }
+            NodeRead::Child(node_id) => {
+                let nodes =
+                    stream::once(nodes_reverse(dir, collator, range, node_id)).try_flatten();
+
+                Box::pin(nodes)
+            }
+            NodeRead::Children(children) => {
+                let last_child = children.len() - 1;
+                let nodes = stream::iter(children.into_iter().enumerate().rev())
+                    .map(move |(i, node_id)| {
+                        if i == 0 || i == last_child {
+                            nodes_reverse(dir.clone(), collator.clone(), range.clone(), node_id)
+                        } else {
+                            nodes_reverse(dir.clone(), collator.clone(), Range::default(), node_id)
+                        }
+                    })
+                    .buffered(2)
+                    .try_flatten();
+
+                Box::pin(nodes)
+            }
+            NodeRead::Leaf(range) => {
+                let nodes = stream::once(future::ready(Ok(Leaf::new(node, range))));
+                Box::pin(nodes)
+            }
+        };
+
+        nodes
     });
 
     Box::pin(fut)
