@@ -217,6 +217,16 @@ impl<C: Collate> OverlapsRange<Range<C::Value>, Collator<C>> for Range<C::Value>
     }
 }
 
+impl<V> From<Key<V>> for Range<V> {
+    fn from(prefix: Key<V>) -> Self {
+        Self {
+            prefix,
+            start: Bound::Unbounded,
+            end: Bound::Unbounded,
+        }
+    }
+}
+
 impl<V, K: Into<Key<V>>> From<(K, Bounds<V>)> for Range<V> {
     fn from(tuple: (K, Bounds<V>)) -> Self {
         let (prefix, suffix) = tuple;
