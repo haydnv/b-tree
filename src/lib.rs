@@ -7,6 +7,7 @@ use std::fmt;
 
 use collate::Collate;
 
+mod group;
 mod node;
 mod range;
 mod tree;
@@ -16,6 +17,8 @@ pub use range::Range;
 pub use tree::{BTree, BTreeLock, BTreeReadGuard, BTreeWriteGuard, Keys};
 
 pub use collate;
+
+const NODE_STACK_SIZE: usize = 32;
 
 /// The size limit for a [`Key`] in a stream to be stack-allocated
 pub const KEY_STACK_SIZE: usize = 32;

@@ -16,11 +16,10 @@ use safecast::AsType;
 use smallvec::SmallVec;
 use uuid::Uuid;
 
+use super::group::GroupBy;
 use super::node::Block;
 use super::range::Range;
-use super::{Collator, Key, Schema};
-
-const NODE_STACK_SIZE: usize = 32;
+use super::{Collator, Key, Schema, NODE_STACK_SIZE};
 
 type NodeStack<V> = SmallVec<[Key<V>; NODE_STACK_SIZE]>;
 
@@ -33,7 +32,6 @@ pub type BTreeWriteGuard<S, C, FE> = BTree<S, C, DirWriteGuardOwned<FE>>;
 /// A stream of [`Key`]s in a [`BTree`]
 pub type Keys<V> = Pin<Box<dyn Stream<Item = Result<Key<V>, io::Error>> + Send>>;
 
-/// A stream of [`Leaf`] nodes in a [`BTree`]
 type Nodes<FE, V> = Pin<Box<dyn Stream<Item = Result<Leaf<FE, V>, io::Error>> + Send>>;
 
 type Node<V> = super::node::Node<Vec<Vec<V>>>;
@@ -628,6 +626,35 @@ where
                 .try_flatten();
 
             Ok(Box::pin(keys))
+        }
+    }
+
+    /// Construct a [`Stream`] of unique length-`n` prefixes within the given `range`.
+    pub async fn groups(
+        self,
+        range: Range<S::Value>,
+        n: usize,
+        reverse: bool,
+    ) -> Result<Keys<S::Value>, io::Error> {
+        if n <= self.schema.len() {
+            let collator = self.collator.clone();
+
+            let nodes = if reverse {
+                nodes_reverse(self.dir, self.collator, range, ROOT).await?
+            } else {
+                nodes_forward(self.dir, self.collator, range, ROOT).await?
+            };
+
+            let groups = GroupBy::new(collator, nodes, n, reverse);
+            Ok(Box::pin(groups))
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "a table with {} columns does not have prefix groups of length {n}",
+                    self.schema.len()
+                ),
+            ))
         }
     }
 
