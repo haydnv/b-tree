@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::{fmt, io};
@@ -354,9 +355,9 @@ where
     }
 
     /// Count how many keys lie within the given `range` of this B+Tree.
-    pub async fn count(&self, range: &Range<S::Value>) -> Result<u64, io::Error> {
+    pub async fn count<R: Borrow<Range<S::Value>>>(&self, range: R) -> Result<u64, io::Error> {
         let root = self.dir.as_dir().read_file(&ROOT).await?;
-        self.count_inner(range, root).await
+        self.count_inner(range.borrow(), root).await
     }
 
     fn count_inner<'a>(
@@ -436,7 +437,12 @@ where
     }
 
     /// Return the first key in this B+Tree within the given `range`, if any.
-    pub async fn first(&self, range: &Range<S::Value>) -> Result<Option<Key<S::Value>>, io::Error> {
+    pub async fn first<R: Borrow<Range<S::Value>>>(
+        &self,
+        range: R,
+    ) -> Result<Option<Key<S::Value>>, io::Error> {
+        let range = range.borrow();
+
         let mut node = self.dir.as_dir().read_file(&ROOT).await?;
 
         if let Node::Leaf(keys) = &*node {
@@ -478,7 +484,12 @@ where
     }
 
     /// Return the last key in this B+Tree with the given `prefix`, if any.
-    pub async fn last(&self, range: &Range<S::Value>) -> Result<Option<Key<S::Value>>, io::Error> {
+    pub async fn last<R: Borrow<Range<S::Value>>>(
+        &self,
+        range: R,
+    ) -> Result<Option<Key<S::Value>>, io::Error> {
+        let range = range.borrow();
+
         let mut node = self.dir.as_dir().read_file(&ROOT).await?;
 
         if let Node::Leaf(keys) = &*node {
@@ -518,7 +529,8 @@ where
     }
 
     /// Return `true` if the given `range` of this B+Tree contains zero keys.
-    pub async fn is_empty(&self, range: &Range<S::Value>) -> Result<bool, io::Error> {
+    pub async fn is_empty<R: Borrow<Range<S::Value>>>(&self, range: R) -> Result<bool, io::Error> {
+        let range = range.borrow();
         let mut node = self.dir.as_dir().read_file(&ROOT).await?;
 
         Ok(loop {

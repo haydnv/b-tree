@@ -118,13 +118,15 @@ async fn functional_test() -> Result<(), io::Error> {
     // create a new B+ tree
     let btree = BTreeLock::create(schema, Collator::<i16>::default(), dir)?;
 
+    let default_range = Range::<i16>::default();
+
     let n = 300;
 
     {
         let mut view = btree.write().await;
 
-        assert!(view.is_empty(&Range::default()).await?);
-        assert_eq!(view.count(&Range::default()).await?, 0);
+        assert!(view.is_empty(&default_range).await?);
+        assert_eq!(view.count(&default_range).await?, 0);
 
         for i in 1..n {
             let lo = i;
@@ -139,15 +141,15 @@ async fn functional_test() -> Result<(), io::Error> {
             assert!(view.insert(key.clone()).await?);
 
             assert!(view.contains(&key).await?);
-            assert!(!view.is_empty(&Range::from_prefix(vec![i])).await?);
+            assert!(!view.is_empty(Range::from_prefix(vec![i])).await?);
 
             assert_eq!(
-                view.count(&Range::with_range(vec![], 0..i)).await?,
+                view.count(Range::with_range(vec![], 0..i)).await?,
                 (i as u64) - 1
             );
 
             assert_eq!(view.count(&Range::from_prefix(vec![i])).await?, 1);
-            assert_eq!(view.count(&Range::default()).await?, i as u64);
+            assert_eq!(view.count(&default_range).await?, i as u64);
         }
     }
 
@@ -232,6 +234,7 @@ async fn functional_test() -> Result<(), io::Error> {
                 .clone()
                 .groups(Range::from_prefix(smallvec![1]), 2, false)
                 .await?;
+
             assert_eq!(groups.try_next().await?, Some(smallvec![1, i16::MAX - 1]));
             assert_eq!(groups.try_next().await?, None);
 
@@ -256,9 +259,9 @@ async fn functional_test() -> Result<(), io::Error> {
         assert_eq!(count, (n - 1) as u64);
         assert!(!view.is_empty(&Range::default()).await?);
 
-        while !view.is_empty(&Range::default()).await? {
-            let lo = view.first(&Range::default()).await?.expect("first")[0];
-            let hi = view.last(&Range::default()).await?.expect("last")[0];
+        while !view.is_empty(&default_range).await? {
+            let lo = view.first(&default_range).await?.expect("first")[0];
+            let hi = view.last(&default_range).await?.expect("last")[0];
 
             let i = rand::thread_rng().gen_range(lo..(hi + 1));
             let key = [i, i16::MAX - i, i16::MAX - 2 * i];
