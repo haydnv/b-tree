@@ -81,6 +81,15 @@ impl<V> Range<V> {
             self.prefix.len()
         }
     }
+
+    /// Construct a new [`Range`] by prepending the given `prefix` to this one.
+    pub fn prepend<I: IntoIterator<Item = V>>(self, prefix: I) -> Self {
+        Self {
+            prefix: prefix.into_iter().chain(self.prefix).collect(),
+            start: self.start,
+            end: self.end,
+        }
+    }
 }
 
 impl<C> OverlapsValue<Vec<C::Value>, Collator<C>> for Range<C::Value>
