@@ -2,6 +2,7 @@
 //!
 //! See the `examples` directory for usage examples.
 
+use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::fmt;
 
@@ -45,9 +46,13 @@ impl<C> Collator<C> {
 }
 
 impl<C: Collate> Collator<C> {
-    fn cmp_slices(&self, left: &[C::Value], right: &[C::Value]) -> Ordering {
+    fn cmp_slices<L, R>(&self, left: &[L], right: &[R]) -> Ordering
+    where
+        L: Borrow<C::Value>,
+        R: Borrow<C::Value>,
+    {
         for i in 0..Ord::min(left.len(), right.len()) {
-            match self.value.cmp(&left[i], &right[i]) {
+            match self.value.cmp(left[i].borrow(), right[i].borrow()) {
                 Ordering::Equal => {}
                 ord => return ord,
             }

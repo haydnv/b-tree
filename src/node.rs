@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::fmt;
 
@@ -22,13 +23,15 @@ pub trait Block<V> {
     where
         C: Collate<Value = V>;
 
-    fn bisect_left<C>(&self, key: &[V], collator: &Collator<C>) -> usize
+    fn bisect_left<C, BV>(&self, key: &[BV], collator: &Collator<C>) -> usize
     where
-        C: Collate<Value = V>;
+        C: Collate<Value = V>,
+        BV: Borrow<V>;
 
-    fn bisect_right<C>(&self, key: &[V], collator: &Collator<C>) -> usize
+    fn bisect_right<C, BV>(&self, key: &[BV], collator: &Collator<C>) -> usize
     where
-        C: Collate<Value = V>;
+        C: Collate<Value = V>,
+        BV: Borrow<V>;
 }
 
 impl<V: fmt::Debug> Block<V> for Vec<Vec<V>> {
@@ -88,9 +91,10 @@ impl<V: fmt::Debug> Block<V> for Vec<Vec<V>> {
         (left, right)
     }
 
-    fn bisect_left<C>(&self, key: &[V], collator: &Collator<C>) -> usize
+    fn bisect_left<C, BV>(&self, key: &[BV], collator: &Collator<C>) -> usize
     where
         C: Collate<Value = V>,
+        BV: Borrow<V>,
     {
         let mut lo = 0;
         let mut hi = self.len();
@@ -106,9 +110,10 @@ impl<V: fmt::Debug> Block<V> for Vec<Vec<V>> {
         lo
     }
 
-    fn bisect_right<C>(&self, key: &[V], collator: &Collator<C>) -> usize
+    fn bisect_right<C, BV>(&self, key: &[BV], collator: &Collator<C>) -> usize
     where
         C: Collate<Value = V>,
+        BV: Borrow<V>,
     {
         let mut lo = 0;
         let mut hi = self.len();

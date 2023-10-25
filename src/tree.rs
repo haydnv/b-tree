@@ -966,13 +966,16 @@ where
     Node<S::Value>: FileLoad,
 {
     /// Delete the given `key` from this B+Tree.
-    pub async fn delete(&mut self, key: &[S::Value]) -> Result<bool, io::Error> {
+    pub async fn delete<V>(&mut self, key: &[V]) -> Result<bool, io::Error>
+    where
+        V: Borrow<S::Value> + Send + Sync,
+    {
         let mut root = self.dir.write_file_owned(&ROOT).await?;
 
         let new_root = match &mut *root {
             Node::Leaf(keys) => {
                 let i = keys.bisect_left(&key, &self.collator);
-                if i < keys.len() && &keys[i] == key {
+                if i < keys.len() && keys[i].iter().zip(key).all(|(l, r)| l == r.borrow()) {
                     keys.remove(i);
                     return Ok(true);
                 } else {
@@ -1032,17 +1035,20 @@ where
         Ok(true)
     }
 
-    fn delete_inner<'a>(
+    fn delete_inner<'a, V>(
         &'a mut self,
         mut node: FileWriteGuardOwned<FE, Node<S::Value>>,
-        key: &'a [S::Value],
-    ) -> Pin<Box<dyn Future<Output = Result<Delete<FE, S::Value>, io::Error>> + Send + 'a>> {
+        key: &'a [V],
+    ) -> Pin<Box<dyn Future<Output = Result<Delete<FE, S::Value>, io::Error>> + Send + 'a>>
+    where
+        V: Borrow<S::Value> + Send + Sync,
+    {
         Box::pin(async move {
             match &mut *node {
                 Node::Leaf(keys) => {
                     let i = keys.bisect_left(&key, &self.collator);
 
-                    if i < keys.len() && &keys[i] == key {
+                    if i < keys.len() && keys[i].iter().zip(key).all(|(l, r)| l == r.borrow()) {
                         keys.remove(i);
 
                         if keys.len() < (self.schema.order() / 2) {
