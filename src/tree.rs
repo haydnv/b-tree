@@ -355,21 +355,27 @@ where
     }
 
     /// Count how many keys lie within the given `range` of this B+Tree.
-    pub async fn count<R: Borrow<Range<S::Value>>>(&self, range: R) -> Result<u64, io::Error> {
+    pub async fn count<BV>(&self, range: &Range<BV>) -> Result<u64, io::Error>
+    where
+        BV: Borrow<S::Value>,
+    {
         let root = self.dir.as_dir().read_file(&ROOT).await?;
-        self.count_inner(range.borrow(), root).await
+        self.count_inner(range, root).await
     }
 
-    fn count_inner<'a>(
+    fn count_inner<'a, BV>(
         &'a self,
-        range: &'a Range<S::Value>,
+        range: &'a Range<BV>,
         node: FileReadGuard<'a, Node<S::Value>>,
-    ) -> Pin<Box<dyn Future<Output = Result<u64, io::Error>> + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<u64, io::Error>> + 'a>>
+    where
+        BV: Borrow<S::Value> + 'a,
+    {
         Box::pin(async move {
             match &*node {
                 Node::Leaf(keys) if range.is_default() => Ok(keys.len() as u64),
                 Node::Leaf(keys) => {
-                    let (l, r) = keys.bisect(range, &self.collator);
+                    let (l, r) = keys.bisect(&range, &self.collator);
 
                     if l == keys.len() {
                         Ok(0)
@@ -392,7 +398,7 @@ where
                         .await
                 }
                 Node::Index(bounds, children) => {
-                    let (l, r) = bounds.bisect(range, &self.collator);
+                    let (l, r) = bounds.bisect(&range, &self.collator);
                     let l = if l == 0 { l } else { l - 1 };
 
                     if l == children.len() {
@@ -413,7 +419,7 @@ where
                             .read_file(&children[l])
                             .and_then(|node| self.count_inner(range, node));
 
-                        let default_range = Range::default();
+                        let default_range = Range::<S::Value>::default();
 
                         let middle = stream::iter(&children[(l + 1)..(r - 1)])
                             .then(|node_id| self.dir.as_dir().read_file(node_id))
@@ -437,12 +443,10 @@ where
     }
 
     /// Return the first key in this B+Tree within the given `range`, if any.
-    pub async fn first<R: Borrow<Range<S::Value>>>(
-        &self,
-        range: R,
-    ) -> Result<Option<Key<S::Value>>, io::Error> {
-        let range = range.borrow();
-
+    pub async fn first<BV>(&self, range: &Range<BV>) -> Result<Option<Key<S::Value>>, io::Error>
+    where
+        BV: Borrow<S::Value>,
+    {
         let mut node = self.dir.as_dir().read_file(&ROOT).await?;
 
         if let Node::Leaf(keys) = &*node {
@@ -484,12 +488,10 @@ where
     }
 
     /// Return the last key in this B+Tree with the given `prefix`, if any.
-    pub async fn last<R: Borrow<Range<S::Value>>>(
-        &self,
-        range: R,
-    ) -> Result<Option<Key<S::Value>>, io::Error> {
-        let range = range.borrow();
-
+    pub async fn last<BV>(&self, range: &Range<BV>) -> Result<Option<Key<S::Value>>, io::Error>
+    where
+        BV: Borrow<S::Value>,
+    {
         let mut node = self.dir.as_dir().read_file(&ROOT).await?;
 
         if let Node::Leaf(keys) = &*node {
@@ -599,11 +601,14 @@ where
     Node<S::Value>: FileLoad + fmt::Debug,
 {
     /// Construct a [`Stream`] of all the keys in the given `range` of this B+Tree.
-    pub async fn keys(
+    pub async fn keys<BV>(
         self,
-        range: Range<S::Value>,
+        range: Range<BV>,
         reverse: bool,
-    ) -> Result<Keys<S::Value>, io::Error> {
+    ) -> Result<Keys<S::Value>, io::Error>
+    where
+        BV: Borrow<S::Value> + Clone + Send + Sync + 'static,
+    {
         if reverse {
             let nodes = nodes_reverse(self.dir, self.collator, range, ROOT).await?;
 
@@ -642,12 +647,15 @@ where
     }
 
     /// Construct a [`Stream`] of unique length-`n` prefixes within the given `range`.
-    pub async fn groups(
+    pub async fn groups<BV>(
         self,
-        range: Range<S::Value>,
+        range: Range<BV>,
         n: usize,
         reverse: bool,
-    ) -> Result<Keys<S::Value>, io::Error> {
+    ) -> Result<Keys<S::Value>, io::Error>
+    where
+        BV: Borrow<S::Value> + Clone + Send + Sync + 'static,
+    {
         if n <= self.schema.len() {
             let collator = self.collator.clone();
 
@@ -696,10 +704,10 @@ where
             }
         }
 
-        let range = Range::default();
-        let count = self.count(&range).await? as usize;
+        let default_range = Range::<S::Value>::default();
+        let count = self.count(&default_range).await? as usize;
         let mut contents = Vec::with_capacity(count);
-        let mut stream = self.keys(range, false).await?;
+        let mut stream = self.keys(default_range, false).await?;
         while let Some(key) = stream.try_next().await? {
             contents.push(key);
         }
@@ -717,15 +725,16 @@ enum NodeRead {
     Leaf((usize, usize)),
 }
 
-fn nodes_forward<C, V, FE, G>(
+fn nodes_forward<C, V, BV, FE, G>(
     dir: G,
     collator: Collator<C>,
-    range: Range<V>,
+    range: Range<BV>,
     node_id: Uuid,
 ) -> Pin<Box<dyn Future<Output = Result<Nodes<FE, V>, io::Error>> + Send>>
 where
     C: Collate<Value = V> + Clone + Send + Sync + 'static,
     V: Clone + PartialEq + fmt::Debug + Send + Sync + 'static,
+    BV: Borrow<V> + Clone + Send + Sync + 'static,
     FE: AsType<Node<V>> + Send + Sync + 'static,
     G: DirDeref<Entry = FE> + Clone + Send + Sync + 'static,
     Node<V>: FileLoad,
@@ -795,7 +804,12 @@ where
                         if i == 0 || i == last_child {
                             nodes_forward(dir.clone(), collator.clone(), range.clone(), node_id)
                         } else {
-                            nodes_forward(dir.clone(), collator.clone(), Range::default(), node_id)
+                            nodes_forward(
+                                dir.clone(),
+                                collator.clone(),
+                                Range::<V>::default(),
+                                node_id,
+                            )
                         }
                     })
                     .buffered(2)
@@ -815,15 +829,16 @@ where
     Box::pin(fut)
 }
 
-fn nodes_reverse<C, V, FE, G>(
+fn nodes_reverse<C, V, BV, FE, G>(
     dir: G,
     collator: Collator<C>,
-    range: Range<V>,
+    range: Range<BV>,
     node_id: Uuid,
 ) -> Pin<Box<dyn Future<Output = Result<Nodes<FE, V>, io::Error>> + Send>>
 where
     C: Collate<Value = V> + Clone + Send + Sync + 'static,
     V: Clone + PartialEq + fmt::Debug + Send + Sync + 'static,
+    BV: Borrow<V> + Clone + Send + Sync + 'static,
     FE: AsType<Node<V>> + Send + Sync + 'static,
     G: DirDeref<Entry = FE> + Clone + Send + Sync + 'static,
     Node<V>: FileLoad,
@@ -892,7 +907,12 @@ where
                         if i == 0 || i == last_child {
                             nodes_reverse(dir.clone(), collator.clone(), range.clone(), node_id)
                         } else {
-                            nodes_reverse(dir.clone(), collator.clone(), Range::default(), node_id)
+                            nodes_reverse(
+                                dir.clone(),
+                                collator.clone(),
+                                Range::<V>::default(),
+                                node_id,
+                            )
                         }
                     })
                     .buffered(2)
@@ -1571,7 +1591,7 @@ where
         validate_collator_eq(&self.collator, &other.collator)?;
         validate_schema_eq(&self.schema, &other.schema)?;
 
-        let mut keys = other.keys(Range::default(), false).await?;
+        let mut keys = other.keys(Range::<S::Value>::default(), false).await?;
         while let Some(key) = keys.try_next().await? {
             self.insert_root(key.into_vec()).await?;
         }
@@ -1589,7 +1609,7 @@ where
         validate_collator_eq(&self.collator, &other.collator)?;
         validate_schema_eq(&self.schema, &other.schema)?;
 
-        let mut keys = other.keys(Range::default(), false).await?;
+        let mut keys = other.keys(Range::<S::Value>::default(), false).await?;
         while let Some(key) = keys.try_next().await? {
             self.delete(&key).await?;
         }

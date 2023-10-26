@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::fmt;
 use std::ops::{Bound, Range as Bounds};
@@ -92,8 +93,9 @@ impl<V> Range<V> {
     }
 }
 
-impl<C> OverlapsValue<Vec<C::Value>, Collator<C>> for Range<C::Value>
+impl<BV, C> OverlapsValue<Vec<C::Value>, Collator<C>> for Range<BV>
 where
+    BV: Borrow<C::Value>,
     C: Collate,
     C::Value: fmt::Debug,
 {
@@ -107,8 +109,8 @@ where
 
                 let start = match &self.start {
                     Bound::Unbounded => Ordering::Less,
-                    Bound::Included(start) => collator.value.cmp(start, value),
-                    Bound::Excluded(start) => match collator.value.cmp(start, value) {
+                    Bound::Included(start) => collator.value.cmp(start.borrow(), value),
+                    Bound::Excluded(start) => match collator.value.cmp(start.borrow(), value) {
                         Ordering::Less => Ordering::Less,
                         Ordering::Greater | Ordering::Equal => Ordering::Greater,
                     },
@@ -116,8 +118,8 @@ where
 
                 let end = match &self.end {
                     Bound::Unbounded => Ordering::Greater,
-                    Bound::Included(end) => collator.value.cmp(end, value),
-                    Bound::Excluded(end) => match collator.value.cmp(end, value) {
+                    Bound::Included(end) => collator.value.cmp(end.borrow(), value),
+                    Bound::Excluded(end) => match collator.value.cmp(end.borrow(), value) {
                         Ordering::Greater => Ordering::Greater,
                         Ordering::Less | Ordering::Equal => Ordering::Less,
                     },
@@ -125,20 +127,11 @@ where
 
                 match (start, end) {
                     (start, Ordering::Less) => {
-                        debug_assert!(
-                            start != Ordering::Greater,
-                            "test if {self:?} overlaps {key:?}"
-                        );
-
+                        debug_assert!(start != Ordering::Greater);
                         Overlap::Less
                     }
                     (Ordering::Greater, end) => {
-                        debug_assert_eq!(
-                            end,
-                            Ordering::Greater,
-                            "test if {self:?} overlaps {key:?}"
-                        );
-
+                        debug_assert_eq!(end, Ordering::Greater);
                         Overlap::Greater
                     }
                     (Ordering::Equal, Ordering::Equal) if key.len() == self.prefix.len() + 1 => {

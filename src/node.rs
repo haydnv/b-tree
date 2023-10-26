@@ -19,9 +19,10 @@ const UUID_SIZE: usize = 16;
 pub trait Block<V> {
     type Key;
 
-    fn bisect<C>(&self, range: &Range<V>, collator: &Collator<C>) -> (usize, usize)
+    fn bisect<C, BV>(&self, range: &Range<BV>, collator: &Collator<C>) -> (usize, usize)
     where
-        C: Collate<Value = V>;
+        C: Collate<Value = V>,
+        BV: Borrow<V>;
 
     fn bisect_left<C, BV>(&self, key: &[BV], collator: &Collator<C>) -> usize
     where
@@ -37,9 +38,10 @@ pub trait Block<V> {
 impl<V: fmt::Debug> Block<V> for Vec<Vec<V>> {
     type Key = Vec<V>;
 
-    fn bisect<C>(&self, range: &Range<V>, collator: &Collator<C>) -> (usize, usize)
+    fn bisect<C, BV>(&self, range: &Range<BV>, collator: &Collator<C>) -> (usize, usize)
     where
         C: Collate<Value = V>,
+        BV: Borrow<V>,
     {
         // handle common edge cases
 
