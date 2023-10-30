@@ -6,7 +6,7 @@ use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::fmt;
 
-use collate::Collate;
+use collate::{Collate, CollateRef};
 
 mod group;
 mod node;
@@ -66,6 +66,18 @@ impl<C: Collate> Collate for Collator<C> {
     type Value = Vec<C::Value>;
 
     fn cmp(&self, left: &Self::Value, right: &Self::Value) -> Ordering {
+        self.cmp_slices(left, right)
+    }
+}
+
+impl<C: Collate> CollateRef<[C::Value]> for Collator<C> {
+    fn cmp_ref(&self, left: &[C::Value], right: &[C::Value]) -> Ordering {
+        self.cmp_slices(left, right)
+    }
+}
+
+impl<C: Collate> CollateRef<Key<C::Value>> for Collator<C> {
+    fn cmp_ref(&self, left: &Key<C::Value>, right: &Key<C::Value>) -> Ordering {
         self.cmp_slices(left, right)
     }
 }
