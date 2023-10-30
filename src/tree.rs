@@ -443,7 +443,7 @@ where
     }
 
     /// Return the first key in this B+Tree within the given `range`, if any.
-    pub async fn first<BV>(&self, range: &Range<BV>) -> Result<Option<Key<S::Value>>, io::Error>
+    pub async fn first<BV>(&self, range: Range<BV>) -> Result<Option<Key<S::Value>>, io::Error>
     where
         BV: Borrow<S::Value>,
     {
@@ -458,7 +458,7 @@ where
         Ok(loop {
             match &*node {
                 Node::Leaf(keys) => {
-                    let (l, _r) = keys.bisect(range, &self.collator);
+                    let (l, _r) = keys.bisect(&range, &self.collator);
 
                     break if l == keys.len() {
                         None
@@ -469,7 +469,7 @@ where
                     };
                 }
                 Node::Index(bounds, children) => {
-                    let (l, _r) = bounds.bisect(range, &self.collator);
+                    let (l, _r) = bounds.bisect(&range, &self.collator);
 
                     if l == bounds.len() {
                         node = self
@@ -488,7 +488,7 @@ where
     }
 
     /// Return the last key in this B+Tree with the given `prefix`, if any.
-    pub async fn last<BV>(&self, range: &Range<BV>) -> Result<Option<Key<S::Value>>, io::Error>
+    pub async fn last<BV>(&self, range: Range<BV>) -> Result<Option<Key<S::Value>>, io::Error>
     where
         BV: Borrow<S::Value>,
     {
@@ -503,7 +503,7 @@ where
         Ok(loop {
             match &*node {
                 Node::Leaf(keys) => {
-                    let (_l, r) = keys.bisect(range, &self.collator);
+                    let (_l, r) = keys.bisect(&range, &self.collator);
 
                     break if r == keys.len() {
                         if range.contains_value(&keys[r - 1], &self.collator) {
@@ -518,7 +518,7 @@ where
                     };
                 }
                 Node::Index(bounds, children) => {
-                    let (_l, r) = bounds.bisect(range, &self.collator);
+                    let (_l, r) = bounds.bisect(&range, &self.collator);
 
                     if r == 0 {
                         break None;

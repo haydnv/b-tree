@@ -49,6 +49,15 @@ impl<V> Range<V> {
         }
     }
 
+    /// Construct an owned [`Range`] by borrowing this [`Range`].
+    pub fn as_ref(&self) -> Range<&V> {
+        Range {
+            prefix: self.prefix.iter().collect(),
+            start: self.start.as_ref(),
+            end: self.end.as_ref(),
+        }
+    }
+
     /// Destructure this [`Range`] into a prefix and [`Bound`]s.
     pub fn into_inner(self) -> (Key<V>, (Bound<V>, Bound<V>)) {
         (self.prefix, (self.start, self.end))
