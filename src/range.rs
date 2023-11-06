@@ -1,8 +1,10 @@
+use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::fmt;
 use std::ops::{Bound, Range as Bounds};
 
 use collate::{Collate, Overlap, OverlapsRange, OverlapsValue};
+use smallvec::smallvec;
 
 use super::{Collator, Key};
 
@@ -17,7 +19,7 @@ pub struct Range<V> {
 impl<V> Default for Range<V> {
     fn default() -> Self {
         Self {
-            prefix: vec![],
+            prefix: smallvec![],
             start: Bound::Unbounded,
             end: Bound::Unbounded,
         }
@@ -26,28 +28,38 @@ impl<V> Default for Range<V> {
 
 impl<V> Range<V> {
     /// Construct a new [`Range`] with the given `prefix`.
-    pub fn with_bounds(prefix: Vec<V>, bounds: (Bound<V>, Bound<V>)) -> Self {
+    pub fn with_bounds<K: Into<Key<V>>>(prefix: K, bounds: (Bound<V>, Bound<V>)) -> Self {
+        let prefix = prefix.into();
         let (start, end) = bounds;
         Self { prefix, start, end }
     }
 
     /// Construct a new [`Range`] with the given `prefix`.
-    pub fn with_range(prefix: Vec<V>, range: Bounds<V>) -> Self {
+    pub fn with_range<K: Into<Key<V>>>(prefix: K, range: Bounds<V>) -> Self {
         let Bounds { start, end } = range;
         Self::with_bounds(prefix, (Bound::Included(start), Bound::Excluded(end)))
     }
 
     /// Construct a new [`Range`] with only the given `prefix`.
-    pub fn from_prefix(prefix: Vec<V>) -> Self {
+    pub fn from_prefix<K: Into<Key<V>>>(prefix: K) -> Self {
         Self {
-            prefix,
+            prefix: prefix.into(),
             start: Bound::Unbounded,
             end: Bound::Unbounded,
         }
     }
 
+    /// Construct an owned [`Range`] by borrowing this [`Range`].
+    pub fn as_ref(&self) -> Range<&V> {
+        Range {
+            prefix: self.prefix.iter().collect(),
+            start: self.start.as_ref(),
+            end: self.end.as_ref(),
+        }
+    }
+
     /// Destructure this [`Range`] into a prefix and [`Bound`]s.
-    pub fn into_inner(self) -> (Vec<V>, (Bound<V>, Bound<V>)) {
+    pub fn into_inner(self) -> (Key<V>, (Bound<V>, Bound<V>)) {
         (self.prefix, (self.start, self.end))
     }
 
@@ -79,15 +91,25 @@ impl<V> Range<V> {
             self.prefix.len()
         }
     }
+
+    /// Construct a new [`Range`] by prepending the given `prefix` to this one.
+    pub fn prepend<I: IntoIterator<Item = V>>(self, prefix: I) -> Self {
+        Self {
+            prefix: prefix.into_iter().chain(self.prefix).collect(),
+            start: self.start,
+            end: self.end,
+        }
+    }
 }
 
-impl<C> OverlapsValue<Key<C::Value>, Collator<C>> for Range<C::Value>
+impl<BV, C> OverlapsValue<Vec<C::Value>, Collator<C>> for Range<BV>
 where
+    BV: Borrow<C::Value>,
     C: Collate,
     C::Value: fmt::Debug,
 {
-    fn overlaps_value(&self, key: &Key<C::Value>, collator: &Collator<C>) -> Overlap {
-        match collator.cmp(&self.prefix, key) {
+    fn overlaps_value(&self, key: &Vec<C::Value>, collator: &Collator<C>) -> Overlap {
+        match collator.cmp_slices(&self.prefix, key) {
             Ordering::Less => Overlap::Less,
             Ordering::Greater => Overlap::Greater,
             Ordering::Equal if self.prefix.len() >= key.len() => Overlap::Narrow,
@@ -96,8 +118,8 @@ where
 
                 let start = match &self.start {
                     Bound::Unbounded => Ordering::Less,
-                    Bound::Included(start) => collator.value.cmp(start, value),
-                    Bound::Excluded(start) => match collator.value.cmp(start, value) {
+                    Bound::Included(start) => collator.value.cmp(start.borrow(), value),
+                    Bound::Excluded(start) => match collator.value.cmp(start.borrow(), value) {
                         Ordering::Less => Ordering::Less,
                         Ordering::Greater | Ordering::Equal => Ordering::Greater,
                     },
@@ -105,8 +127,8 @@ where
 
                 let end = match &self.end {
                     Bound::Unbounded => Ordering::Greater,
-                    Bound::Included(end) => collator.value.cmp(end, value),
-                    Bound::Excluded(end) => match collator.value.cmp(end, value) {
+                    Bound::Included(end) => collator.value.cmp(end.borrow(), value),
+                    Bound::Excluded(end) => match collator.value.cmp(end.borrow(), value) {
                         Ordering::Greater => Ordering::Greater,
                         Ordering::Less | Ordering::Equal => Ordering::Less,
                     },
@@ -114,20 +136,11 @@ where
 
                 match (start, end) {
                     (start, Ordering::Less) => {
-                        debug_assert!(
-                            start != Ordering::Greater,
-                            "test if {self:?} overlaps {key:?}"
-                        );
-
+                        debug_assert!(start != Ordering::Greater);
                         Overlap::Less
                     }
                     (Ordering::Greater, end) => {
-                        debug_assert_eq!(
-                            end,
-                            Ordering::Greater,
-                            "test if {self:?} overlaps {key:?}"
-                        );
-
+                        debug_assert_eq!(end, Ordering::Greater);
                         Overlap::Greater
                     }
                     (Ordering::Equal, Ordering::Equal) if key.len() == self.prefix.len() + 1 => {
@@ -174,7 +187,7 @@ impl<C: Collate> OverlapsRange<Range<C::Value>, Collator<C>> for Range<C::Value>
             }
         }
 
-        match collator.cmp(&self.prefix, &other.prefix) {
+        match collator.cmp_slices(&self.prefix, &other.prefix) {
             Ordering::Less => return Overlap::Less,
             Ordering::Greater => return Overlap::Greater,
             Ordering::Equal => match self.prefix.len().cmp(&other.prefix.len()) {
@@ -211,6 +224,16 @@ impl<C: Collate> OverlapsRange<Range<C::Value>, Collator<C>> for Range<C::Value>
                     }
                 }
             },
+        }
+    }
+}
+
+impl<V> From<Key<V>> for Range<V> {
+    fn from(prefix: Key<V>) -> Self {
+        Self {
+            prefix,
+            start: Bound::Unbounded,
+            end: Bound::Unbounded,
         }
     }
 }

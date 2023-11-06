@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::fmt;
 
@@ -11,7 +12,6 @@ use uuid::Uuid;
 
 use super::range::Range;
 use super::Collator;
-use super::Key;
 
 const UUID_SIZE: usize = 16;
 
@@ -19,25 +19,29 @@ const UUID_SIZE: usize = 16;
 pub trait Block<V> {
     type Key;
 
-    fn bisect<C>(&self, range: &Range<V>, collator: &Collator<C>) -> (usize, usize)
-    where
-        C: Collate<Value = V>;
-
-    fn bisect_left<C>(&self, key: &Key<V>, collator: &Collator<C>) -> usize
-    where
-        C: Collate<Value = V>;
-
-    fn bisect_right<C>(&self, key: &Key<V>, collator: &Collator<C>) -> usize
-    where
-        C: Collate<Value = V>;
-}
-
-impl<V: fmt::Debug> Block<V> for Vec<Key<V>> {
-    type Key = Key<V>;
-
-    fn bisect<C>(&self, range: &Range<V>, collator: &Collator<C>) -> (usize, usize)
+    fn bisect<C, BV>(&self, range: &Range<BV>, collator: &Collator<C>) -> (usize, usize)
     where
         C: Collate<Value = V>,
+        BV: Borrow<V>;
+
+    fn bisect_left<C, BV>(&self, key: &[BV], collator: &Collator<C>) -> usize
+    where
+        C: Collate<Value = V>,
+        BV: Borrow<V>;
+
+    fn bisect_right<C, BV>(&self, key: &[BV], collator: &Collator<C>) -> usize
+    where
+        C: Collate<Value = V>,
+        BV: Borrow<V>;
+}
+
+impl<V: fmt::Debug> Block<V> for Vec<Vec<V>> {
+    type Key = Vec<V>;
+
+    fn bisect<C, BV>(&self, range: &Range<BV>, collator: &Collator<C>) -> (usize, usize)
+    where
+        C: Collate<Value = V>,
+        BV: Borrow<V>,
     {
         // handle common edge cases
 
@@ -89,16 +93,17 @@ impl<V: fmt::Debug> Block<V> for Vec<Key<V>> {
         (left, right)
     }
 
-    fn bisect_left<C>(&self, key: &Key<V>, collator: &Collator<C>) -> usize
+    fn bisect_left<C, BV>(&self, key: &[BV], collator: &Collator<C>) -> usize
     where
         C: Collate<Value = V>,
+        BV: Borrow<V>,
     {
         let mut lo = 0;
         let mut hi = self.len();
 
         while lo < hi {
             let mid = (lo + hi) >> 1;
-            match collator.cmp(&self[mid], key) {
+            match collator.cmp_slices(&self[mid], key) {
                 Ordering::Less => lo = mid + 1,
                 _ => hi = mid,
             }
@@ -107,16 +112,17 @@ impl<V: fmt::Debug> Block<V> for Vec<Key<V>> {
         lo
     }
 
-    fn bisect_right<C>(&self, key: &Key<V>, collator: &Collator<C>) -> usize
+    fn bisect_right<C, BV>(&self, key: &[BV], collator: &Collator<C>) -> usize
     where
         C: Collate<Value = V>,
+        BV: Borrow<V>,
     {
         let mut lo = 0;
         let mut hi = self.len();
 
         while lo < hi {
             let mid = (lo + hi) >> 1;
-            match collator.cmp(&self[mid], key) {
+            match collator.cmp_slices(&self[mid], key) {
                 Ordering::Greater => hi = mid,
                 _ => lo = mid + 1,
             }
