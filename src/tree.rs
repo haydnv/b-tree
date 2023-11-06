@@ -114,6 +114,8 @@ where
         if nodes.is_empty() {
             nodes.create_file::<Node<S::Value>>(ROOT.to_string(), Node::Leaf(vec![]), 0)?;
 
+            debug_assert!(nodes.contains(&ROOT), "B+Tree failed to create a root node");
+
             Ok(Self::new(schema, collator, dir))
         } else {
             Err(io::Error::new(
@@ -130,6 +132,8 @@ where
         if !nodes.contains(&ROOT) {
             nodes.create_file(ROOT.to_string(), Node::Leaf(vec![]), 0)?;
         }
+
+        debug_assert!(nodes.contains(&ROOT), "B+Tree failed to create a root node");
 
         Ok(Self::new(schema, collator, dir))
     }
@@ -325,6 +329,11 @@ where
 {
     /// Return `true` if this B+Tree contains the given `key`.
     pub async fn contains(&self, key: &[S::Value]) -> Result<bool, io::Error> {
+        debug_assert!(
+            self.dir.as_dir().contains(&ROOT),
+            "B+Tree is missing its root node"
+        );
+
         let mut node = self.dir.as_dir().read_file(&ROOT).await?;
 
         loop {
@@ -359,6 +368,10 @@ where
     where
         BV: Borrow<S::Value>,
     {
+        debug_assert!(
+            self.dir.as_dir().contains(&ROOT),
+            "B+Tree is missing its root node"
+        );
         let root = self.dir.as_dir().read_file(&ROOT).await?;
         self.count_inner(range, root).await
     }
@@ -447,6 +460,11 @@ where
     where
         BV: Borrow<S::Value>,
     {
+        debug_assert!(
+            self.dir.as_dir().contains(&ROOT),
+            "B+Tree is missing its root node"
+        );
+
         let mut node = self.dir.as_dir().read_file(&ROOT).await?;
 
         if let Node::Leaf(keys) = &*node {
@@ -492,6 +510,11 @@ where
     where
         BV: Borrow<S::Value>,
     {
+        debug_assert!(
+            self.dir.as_dir().contains(&ROOT),
+            "B+Tree is missing its root node"
+        );
+
         let mut node = self.dir.as_dir().read_file(&ROOT).await?;
 
         if let Node::Leaf(keys) = &*node {
@@ -533,6 +556,12 @@ where
     /// Return `true` if the given `range` of this B+Tree contains zero keys.
     pub async fn is_empty<R: Borrow<Range<S::Value>>>(&self, range: R) -> Result<bool, io::Error> {
         let range = range.borrow();
+
+        debug_assert!(
+            self.dir.as_dir().contains(&ROOT),
+            "B+Tree is missing its root node"
+        );
+
         let mut node = self.dir.as_dir().read_file(&ROOT).await?;
 
         Ok(loop {
@@ -609,6 +638,11 @@ where
     where
         BV: Borrow<S::Value> + Clone + Send + Sync + 'static,
     {
+        debug_assert!(
+            self.dir.as_dir().contains(&ROOT),
+            "B+Tree is missing its root node"
+        );
+
         if reverse {
             let nodes = nodes_reverse(self.dir, self.collator, range, ROOT).await?;
 
@@ -659,6 +693,11 @@ where
         if n <= self.schema.len() {
             let collator = self.collator.clone();
 
+            debug_assert!(
+                self.dir.as_dir().contains(&ROOT),
+                "B+Tree is missing its root node"
+            );
+
             let nodes = if reverse {
                 nodes_reverse(self.dir, self.collator, range, ROOT).await?
             } else {
@@ -681,6 +720,11 @@ where
     #[cfg(debug_assertions)]
     pub async fn is_valid(self) -> Result<bool, io::Error> {
         {
+            debug_assert!(
+                self.dir.as_dir().contains(&ROOT),
+                "B+Tree is missing its root node"
+            );
+
             let root = self.dir.as_dir().read_file(&ROOT).await?;
 
             match &*root {
@@ -723,6 +767,17 @@ enum NodeRead {
     Child(Uuid),
     Children(SmallVec<[Uuid; NODE_STACK_SIZE]>),
     Leaf((usize, usize)),
+}
+
+impl fmt::Debug for NodeRead {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::Excluded => f.write_str("(none)"),
+            Self::Child(id) => write!(f, "child {id}"),
+            Self::Children(ids) => write!(f, "children {ids:?}"),
+            Self::Leaf((start, end)) => write!(f, "leaf records [{start}..{end})"),
+        }
+    }
 }
 
 fn nodes_forward<C, V, BV, FE, G>(
@@ -785,6 +840,9 @@ where
                 }
             }
         };
+
+        #[cfg(feature = "logging")]
+        log::trace!("read {read:?}");
 
         let nodes: Nodes<FE, V> = match read {
             NodeRead::Excluded => {
@@ -990,6 +1048,7 @@ where
     where
         V: Borrow<S::Value> + Send + Sync,
     {
+        debug_assert!(self.dir.contains(&ROOT), "B+Tree is missing its root node");
         let mut root = self.dir.write_file_owned(&ROOT).await?;
 
         let new_root = match &mut *root {
@@ -1348,6 +1407,8 @@ where
 
     async fn insert_root(&mut self, key: Vec<S::Value>) -> Result<bool, io::Error> {
         let order = self.schema.order();
+
+        debug_assert!(self.dir.contains(&ROOT), "B+Tree is missing its root node");
         let mut root = self.dir.write_file_owned(&ROOT).await?;
 
         let new_root = match &mut *root {
@@ -1570,6 +1631,11 @@ where
         self.dir
             .create_file(ROOT.to_string(), Node::Leaf(vec![]), 0)?;
 
+        debug_assert!(
+            self.dir.contains(&ROOT),
+            "B+Tree failed to re-create its root node"
+        );
+
         Ok(())
     }
 }
@@ -1615,6 +1681,12 @@ where
         }
 
         Ok(())
+    }
+}
+
+impl<S: fmt::Debug, C, G> fmt::Debug for BTree<S, C, G> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "B+Tree index with schema {:?}", self.schema)
     }
 }
 
