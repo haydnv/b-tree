@@ -22,9 +22,9 @@ required-features = ["stream"]
 
 [dependencies]
 async-trait = { version = "0.1", optional = true }
-collate = { path = "../collate" }
+collate = "0.4"
 destream = { version = "0.7", optional = true }
-freqfs = { path = "../freqfs" }
+freqfs = "0.9"
 futures = "0.3"
 get-size = "0.1"
 log = { version = "0.4", features = ["release_max_level_info"], optional = true }
