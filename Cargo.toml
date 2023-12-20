@@ -1,6 +1,6 @@
 [package]
 name = "b-tree"
-version = "0.3.0"
+version = "0.3.1"
 authors = ["code@tinychain.net"]
 edition = "2021"
 description = "A persistent B+ tree using freqfs"
@@ -32,8 +32,8 @@ num_cpus = "1.16"
 pin-project = "1.0"
 safecast = "0.2"
 smallvec = "1.11"
-uuid = "1.5"
+uuid = "1.6"
 
 [dev-dependencies]
 rand = "0.8"
-tokio = { version = "1.33", features = ["macros"] }
+tokio = { version = "1.35", features = ["macros"] }
