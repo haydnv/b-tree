@@ -1,6 +1,6 @@
 [package]
 name = "b-tree"
-version = "0.3.1"
+version = "0.4.0"
 authors = ["code@tinychain.net"]
 edition = "2021"
 description = "A persistent B+ tree using freqfs"
@@ -23,17 +23,17 @@ required-features = ["stream"]
 [dependencies]
 async-trait = { version = "0.1", optional = true }
 collate = "0.4"
-destream = { version = "0.7", optional = true }
-freqfs = "0.9"
+destream = { version = "0.8", optional = true }
+freqfs = "0.10"
 futures = "0.3"
 get-size = "0.1"
 log = { version = "0.4", features = ["release_max_level_info"], optional = true }
 num_cpus = "1.16"
 pin-project = "1.0"
 safecast = "0.2"
-smallvec = "1.11"
-uuid = "1.6"
+smallvec = "1.13"
+uuid = "1.10"
 
 [dev-dependencies]
 rand = "0.8"
-tokio = { version = "1.35", features = ["macros"] }
+tokio = { version = "1.39", features = ["macros"] }
